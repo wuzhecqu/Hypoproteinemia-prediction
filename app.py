@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import shap
+import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.metrics import roc_auc_score, accuracy_score, recall_score
@@ -274,4 +275,5 @@ elif option == "📁 Validation Set Evaluation":
 
 # Footer
 st.sidebar.markdown("---")
+
 st.sidebar.info("**Clinical Decision Support Tool**\n\nFor research use only. Always consult with clinical professionals.")
