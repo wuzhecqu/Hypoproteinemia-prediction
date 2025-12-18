@@ -1,14 +1,9 @@
-streamlit==1.35.0
-lightgbm==4.1.0  # 先注释掉
-shap==0.44.0  # 先注释掉
-scikit-learn==1.3.0
-pandas==2.0.0
-numpy==1.24.0
-joblib==1.3.0
-plotly==5.17.0
-matplotlib==3.7.2
+streamlit==1.29.0
+lightgbm==4.0.0
+shap==0.42.1
+scikit-learn==1.2.2
+pandas==2.0.3
+numpy==1.24.3
 openpyxl==3.1.2
-
-
-
-
+plotly==5.17.0
+joblib==1.3.0
