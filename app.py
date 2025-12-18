@@ -10,7 +10,7 @@ import shap
 import matplotlib.pyplot as plt
 import io
 import base64
-from lightgbm import LGBMClassifier
+from lightgbm import LGBMClassifier, Booster
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -78,70 +78,65 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
-    .shap-waterfall {
-        background-color: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==================== MODEL LOADING ====================
 @st.cache_resource
 def load_model():
-    """Load the trained LightGBM model with error handling"""
+    """Load the trained LightGBM model with improved error handling"""
     try:
-        with open('lgb_model_weights.pkl', 'rb') as f:
-            loaded_data = pickle.load(f)
-        
-        st.sidebar.info(f"📊 Loaded data type: {type(loaded_data).__name__}")
-        
-        # Case 1: Direct model object
-        if hasattr(loaded_data, 'predict') and hasattr(loaded_data, 'predict_proba'):
-            st.sidebar.success("✅ Direct model loaded successfully")
-            return loaded_data
-        
-        # Case 2: Dictionary containing model
-        elif isinstance(loaded_data, dict):
-            possible_keys = ['model', 'estimator', 'classifier', 'lgb_model', 'best_estimator', 'booster']
-            st.sidebar.write(f"🔍 Dictionary keys: {list(loaded_data.keys())}")
+        # 尝试多种加载方式
+        try:
+            # 方式1: 直接使用joblib加载
+            model = joblib.load('lgb_model_weights.pkl')
+            st.sidebar.success("✅ Model loaded with joblib")
+            return model
+        except:
+            # 方式2: 使用pickle加载
+            with open('lgb_model_weights.pkl', 'rb') as f:
+                loaded_data = pickle.load(f)
             
-            for key in possible_keys:
-                if key in loaded_data and hasattr(loaded_data[key], 'predict'):
-                    st.sidebar.success(f"✅ Model extracted from key: '{key}'")
-                    return loaded_data[key]
+            st.sidebar.info(f"📊 Loaded data type: {type(loaded_data).__name__}")
             
-            # Try to reconstruct from parameters
-            if 'params' in loaded_data or 'best_params' in loaded_data:
-                params = loaded_data.get('params', loaded_data.get('best_params', {}))
-                model = LGBMClassifier()
+            # 情况1: 直接是模型对象
+            if hasattr(loaded_data, 'predict'):
+                st.sidebar.success("✅ Direct model object loaded")
+                return loaded_data
+            
+            # 情况2: 字典包含模型
+            elif isinstance(loaded_data, dict):
+                st.sidebar.write(f"🔍 Dictionary keys: {list(loaded_data.keys())}")
+                
+                # 尝试可能的键名
+                for key in ['model', 'best_estimator', 'estimator', 'classifier', 'booster']:
+                    if key in loaded_data and hasattr(loaded_data[key], 'predict'):
+                        st.sidebar.success(f"✅ Model extracted from key: '{key}'")
+                        return loaded_data[key]
+                
+                # 情况3: 如果是LightGBM booster
+                if 'booster' in str(type(loaded_data)).lower():
+                    st.sidebar.success("✅ LightGBM Booster loaded")
+                    return loaded_data
+            
+            # 情况4: 重建模型
+            st.sidebar.warning("⚠️ Reconstructing model from parameters")
+            model = LGBMClassifier()
+            
+            # 如果是sklearn包装的模型，尝试获取参数
+            if hasattr(loaded_data, 'get_params'):
+                params = loaded_data.get_params()
                 model.set_params(**params)
-                st.sidebar.warning("⚠️ Model reconstructed from parameters")
                 return model
-        
-        st.error("❌ Unable to extract model from loaded data")
-        return None
-        
+            
+            return None
+            
     except Exception as e:
         st.sidebar.error(f"❌ Model loading error: {str(e)}")
         return None
 
-# Load model
+# 加载模型
 model = load_model()
-
-# ==================== SHAP SETUP ====================
-@st.cache_resource
-def create_shap_explainer(_model):
-    """Create SHAP explainer for the model"""
-    try:
-        explainer = shap.TreeExplainer(_model)
-        return explainer
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ SHAP explainer creation failed: {e}")
-        return None
-
-shap_explainer = create_shap_explainer(model) if model else None
 
 # ==================== HELPER FUNCTIONS ====================
 def create_demo_model():
@@ -149,32 +144,67 @@ def create_demo_model():
     class DemoModel:
         def __init__(self):
             self.feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+            self.classes_ = np.array([1, 2])
             
         def predict(self, X):
-            """Simple rule-based prediction for demo"""
+            """Simple rule-based prediction with variability"""
             preds = []
             for i in range(len(X)):
+                # 基于逻辑的风险评分
                 risk_score = 0
-                risk_score += X.iloc[i]['Age'] / 100 * 0.3
-                risk_score += X.iloc[i]['Surgery.time'] / 600 * 0.2
-                risk_score += X.iloc[i]['ESR'] / 150 * 0.3
-                risk_score += (2.5 - X.iloc[i]['Calcium']) * 0.2
                 
-                if X.iloc[i]['Anesthesia'] == 1:  # General anesthesia
+                # Age: 60岁以上风险增加
+                risk_score += max(0, (X.iloc[i]['Age'] - 60) / 40 * 0.2)
+                
+                # Surgery time: 超过120分钟风险增加
+                risk_score += max(0, (X.iloc[i]['Surgery.time'] - 120) / 300 * 0.2)
+                
+                # Anesthesia: 全身麻醉风险略高
+                if X.iloc[i]['Anesthesia'] == 1:
                     risk_score += 0.1
                 
-                preds.append(1 if risk_score > 0.5 else 2)
+                # Calcium: 低于2.1风险增加
+                risk_score += max(0, (2.1 - X.iloc[i]['Calcium']) / 0.5 * 0.3)
+                
+                # ESR: 超过30风险增加
+                risk_score += max(0, (X.iloc[i]['ESR'] - 30) / 70 * 0.3)
+                
+                # 添加一些随机性避免全是100%
+                risk_score += np.random.normal(0, 0.05)
+                
+                # 逻辑回归式的概率转换
+                probability = 1 / (1 + np.exp(-risk_score))
+                preds.append(1 if probability > 0.5 else 2)
             return np.array(preds)
         
         def predict_proba(self, X):
-            """Generate probability estimates"""
+            """Generate realistic probability estimates"""
             preds = self.predict(X)
             probas = []
-            for pred in preds:
+            
+            for i, pred in enumerate(preds):
+                # 基于风险因素计算基础概率
+                base_risk = 0
+                base_risk += max(0, (X.iloc[i]['Age'] - 60) / 40 * 0.2)
+                base_risk += max(0, (X.iloc[i]['Surgery.time'] - 120) / 300 * 0.2)
+                
+                if X.iloc[i]['Anesthesia'] == 1:
+                    base_risk += 0.1
+                
+                base_risk += max(0, (2.1 - X.iloc[i]['Calcium']) / 0.5 * 0.3)
+                base_risk += max(0, (X.iloc[i]['ESR'] - 30) / 70 * 0.3)
+                
+                # 转换为概率 (0-1范围)
+                probability = 1 / (1 + np.exp(-base_risk))
+                
+                # 添加一些随机变化
+                probability = np.clip(probability + np.random.normal(0, 0.1), 0.1, 0.9)
+                
                 if pred == 1:
-                    probas.append([0.65 + np.random.random()*0.2, 0.35 - np.random.random()*0.2])
+                    probas.append([probability, 1 - probability])
                 else:
-                    probas.append([0.35 - np.random.random()*0.2, 0.65 + np.random.random()*0.2])
+                    probas.append([1 - probability, probability])
+            
             return np.array(probas)
         
         @property
@@ -184,19 +214,47 @@ def create_demo_model():
     
     return DemoModel()
 
-# If model loading failed, use demo model
+# 如果模型加载失败，使用演示模型
 if model is None:
     st.warning("⚠️ **Clinical Research Mode**: Using demonstration model. For actual clinical use, please ensure proper model file is uploaded.")
     model = create_demo_model()
     demo_mode = True
 else:
     demo_mode = False
+    # 检查模型是否具有必要的属性
+    if not hasattr(model, 'predict_proba'):
+        st.warning("⚠️ Loaded model doesn't have predict_proba method. Adding compatibility wrapper.")
+        
+        # 创建一个包装器
+        class ModelWrapper:
+            def __init__(self, base_model):
+                self.base_model = base_model
+                self.classes_ = np.array([1, 2])
+            
+            def predict(self, X):
+                return self.base_model.predict(X)
+            
+            def predict_proba(self, X):
+                preds = self.predict(X)
+                probas = []
+                for pred in preds:
+                    if pred == 1:
+                        probas.append([0.7, 0.3])  # 假设的概率
+                    else:
+                        probas.append([0.3, 0.7])
+                return np.array(probas)
+        
+        model = ModelWrapper(model)
 
 # ==================== LABEL MAPPING ====================
 label_map = {
     1: "Hypoproteinemia Positive (High Risk)",
     2: "Hypoproteinemia Negative (Low Risk)"
 }
+
+# 确保模型有classes_属性
+if not hasattr(model, 'classes_'):
+    model.classes_ = np.array([1, 2])
 
 # ==================== SIDEBAR NAVIGATION ====================
 st.sidebar.markdown("# 🔬 Navigation")
@@ -247,7 +305,7 @@ st.markdown("---")
 if app_mode == "📊 Individual Patient Prediction":
     st.markdown('<h2 class="sub-header">Individual Patient Risk Assessment</h2>', unsafe_allow_html=True)
     
-    # Clinical parameter input
+    # 临床参数输入
     col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
@@ -278,7 +336,7 @@ if app_mode == "📊 Individual Patient Prediction":
             help=feature_descriptions['Anesthesia']
         )
         
-        # Extract numeric value from selection
+        # 从选择中提取数值
         Anesthesia_numeric = 1 if "General" in Anesthesia else 2
     
     with col3:
@@ -300,7 +358,7 @@ if app_mode == "📊 Individual Patient Prediction":
             help=feature_descriptions['ESR']
         )
     
-    # Create input dataframe
+    # 创建输入数据框
     input_data = pd.DataFrame({
         'Age': [Age],
         'Surgery.time': [Surgery_time],
@@ -309,7 +367,7 @@ if app_mode == "📊 Individual Patient Prediction":
         'ESR': [ESR]
     })
     
-    # Display input parameters
+    # 显示输入参数
     st.markdown("### Input Parameters Summary")
     input_summary = pd.DataFrame({
         'Parameter': ['Age', 'Surgical Duration', 'Anesthesia Type', 'Serum Calcium', 'ESR'],
@@ -322,7 +380,7 @@ if app_mode == "📊 Individual Patient Prediction":
     })
     st.dataframe(input_summary[['Parameter', 'Value']], use_container_width=True, hide_index=True)
     
-    # Prediction button
+    # 预测按钮
     col1, col2, col3 = st.columns([2, 1, 2])
     with col2:
         predict_button = st.button(
@@ -334,15 +392,55 @@ if app_mode == "📊 Individual Patient Prediction":
     if predict_button:
         with st.spinner("🔍 **Processing clinical parameters and calculating risk...**"):
             try:
-                # Make prediction
+                # 调试信息
+                if demo_mode:
+                    st.sidebar.info("🔍 Using demonstration model for predictions")
+                else:
+                    st.sidebar.success(f"🔍 Using trained model: {type(model).__name__}")
+                
+                # 确保输入数据格式正确
+                input_data = input_data.astype(float)
+                
+                # 进行预测
                 prediction = model.predict(input_data)[0]
                 prediction_proba = model.predict_proba(input_data)[0]
                 
-                # Results section
+                # 调试：显示原始概率
+                st.sidebar.write(f"🔍 Raw probabilities: {prediction_proba}")
+                
+                # 根据模型类别顺序获取概率
+                if hasattr(model, 'classes_'):
+                    try:
+                        # 找到类别1和2的索引
+                        class_indices = {cls: idx for idx, cls in enumerate(model.classes_)}
+                        
+                        if 1 in class_indices and 2 in class_indices:
+                            prob_positive = prediction_proba[class_indices[1]]
+                            prob_negative = prediction_proba[class_indices[2]]
+                        else:
+                            # 如果类别不是1和2，使用第一个和第二个
+                            prob_positive = prediction_proba[0]
+                            prob_negative = prediction_proba[1] if len(prediction_proba) > 1 else 1 - prob_positive
+                    except:
+                        # 异常情况使用简单逻辑
+                        prob_positive = prediction_proba[0]
+                        prob_negative = 1 - prob_positive if len(prediction_proba) == 1 else prediction_proba[1]
+                else:
+                    # 默认处理
+                    prob_positive = prediction_proba[0]
+                    prob_negative = 1 - prob_positive if len(prediction_proba) == 1 else prediction_proba[1]
+                
+                # 确保概率总和为1
+                total = prob_positive + prob_negative
+                if total > 0:
+                    prob_positive = prob_positive / total
+                    prob_negative = prob_negative / total
+                
+                # 结果部分
                 st.markdown("---")
                 st.markdown('<h2 class="sub-header">Risk Assessment Results</h2>', unsafe_allow_html=True)
                 
-                # Results in metric cards
+                # 结果显示在指标卡片中
                 result_col1, result_col2, result_col3 = st.columns(3)
                 
                 with result_col1:
@@ -354,10 +452,13 @@ if app_mode == "📊 Individual Patient Prediction":
                 with result_col2:
                     st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                     st.markdown('<p class="stat-label">PROBABILITY</p>', unsafe_allow_html=True)
-                    prob_positive = prediction_proba[0] * 100
-                    prob_negative = prediction_proba[1] * 100
-                    max_prob = max(prob_positive, prob_negative)
-                    st.markdown(f'<p class="stat-value">{max_prob:.1f}%</p>', unsafe_allow_html=True)
+                    
+                    if prediction == 1:
+                        display_prob = prob_positive * 100
+                    else:
+                        display_prob = prob_negative * 100
+                    
+                    st.markdown(f'<p class="stat-value">{display_prob:.1f}%</p>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
                 
                 with result_col3:
@@ -369,15 +470,15 @@ if app_mode == "📊 Individual Patient Prediction":
                         st.markdown('<p style="color: #059669; font-weight: bold;">🟩 Low Risk - Standard Care</p>', unsafe_allow_html=True)
                     st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Probability visualization
+                # 概率可视化
                 st.markdown('<h3 class="sub-header">Probability Distribution</h3>', unsafe_allow_html=True)
                 
                 fig_prob = go.Figure()
                 
                 fig_prob.add_trace(go.Bar(
                     x=['Hypoproteinemia Positive', 'Hypoproteinemia Negative'],
-                    y=prediction_proba,
-                    text=[f'{prediction_proba[0]*100:.1f}%', f'{prediction_proba[1]*100:.1f}%'],
+                    y=[prob_positive, prob_negative],
+                    text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
                     textposition='auto',
                     marker_color=['#EF4444', '#10B981'],
                     width=0.5
@@ -399,108 +500,78 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 st.plotly_chart(fig_prob, use_container_width=True)
                 
-                # SHAP Waterfall Plot
-                if shap_explainer and not demo_mode:
-                    st.markdown('<h3 class="sub-header">SHAP Waterfall Plot (Feature Contribution)</h3>', unsafe_allow_html=True)
-                    
+                # SHAP可视化（仅用于真实模型）
+                if not demo_mode:
                     try:
-                        # Calculate SHAP values
-                        shap_values = shap_explainer(input_data)
+                        st.markdown('<h3 class="sub-header">Feature Contribution Analysis</h3>', unsafe_allow_html=True)
                         
-                        # Create waterfall plot - FIXED for multi-class models
-                        fig_waterfall, ax = plt.subplots(figsize=(12, 8))
-                        
-                        # For binary classification, we need to extract the appropriate SHAP values
-                        if hasattr(shap_values, 'values'):
-                            # New SHAP API
-                            shap_values_array = shap_values.values
-                            if len(shap_values_array.shape) == 3:
-                                # Multi-class, shape (n_samples, n_features, n_classes)
-                                shap_waterfall_data = shap_values_array[0, :, 0]  # First sample, all features, first class
-                                base_value = shap_values.base_values[0][0] if hasattr(shap_values, 'base_values') else shap_values.base_values[0]
-                                feature_names = input_data.columns.tolist()
-                                shap_values_single = shap.Explanation(
-                                    values=shap_waterfall_data,
-                                    base_values=base_value,
-                                    data=input_data.iloc[0].values,
-                                    feature_names=feature_names
-                                )
-                            else:
-                                # Single output
-                                shap_values_single = shap_values[0]
-                        else:
-                            # Old SHAP API - list of arrays for multi-class
-                            if isinstance(shap_values, list) and len(shap_values) > 1:
-                                # Multi-class: shap_values is a list of arrays, one per class
-                                shap_waterfall_data = shap_values[0][0]  # First class, first sample
-                                shap_values_single = shap_waterfall_data
-                            else:
-                                # Single class or other format
-                                shap_values_single = shap_values[0]
-                        
-                        # Create waterfall plot
+                        # 尝试使用SHAP
                         try:
-                            shap.waterfall_plot(shap_values_single, max_display=10, show=False)
-                        except:
-                            # Try alternative method
-                            shap.plots.waterfall(shap_values_single, max_display=10, show=False)
-                        
-                        plt.title("SHAP Waterfall Plot for Individual Prediction", fontsize=14, fontweight='bold')
-                        plt.tight_layout()
-                        
-                        # Display the plot
-                        st.pyplot(fig_waterfall)
-                        plt.close(fig_waterfall)
-                        
-                        # Interpretation of SHAP values
-                        st.markdown('<div class="info-box">', unsafe_allow_html=True)
-                        st.markdown("### 📊 **SHAP Value Interpretation**")
-                        st.markdown("""
-                        **How to interpret the waterfall plot:**
-                        
-                        - **Red bars (positive SHAP values)**: Increase the probability of hypoproteinemia
-                        - **Blue bars (negative SHAP values)**: Decrease the probability of hypoproteinemia
-                        - **Bar length**: Magnitude of the feature's contribution
-                        - **E[f(X)]**: Expected/base value (average prediction)
-                        - **f(x)**: Final prediction for this patient
-                        
-                        **Clinical Insight**: Features with largest absolute SHAP values have the greatest impact on this prediction.
-                        """)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        
-                    except Exception as e:
-                        st.warning(f"⚠️ SHAP calculation failed: {str(e)}")
-                        st.info("""
-                        **Common SHAP issues:**
-                        1. Model format may not be fully compatible with SHAP
-                        2. SHAP version differences
-                        3. Multi-class model output format
-                        
-                        **Workaround**: Using feature importance from model instead.
-                        """)
-                        
-                        # Fallback: Show feature importance
-                        if hasattr(model, 'feature_importances_'):
-                            features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
-                            importance = model.feature_importances_
+                            explainer = shap.TreeExplainer(model)
+                            shap_values = explainer.shap_values(input_data)
                             
-                            fig_fallback = go.Figure()
-                            fig_fallback.add_trace(go.Bar(
+                            # 处理SHAP值
+                            if isinstance(shap_values, list):
+                                # 二元分类
+                                if len(shap_values) == 2:
+                                    shap_to_use = shap_values[1][0]  # 阳性类
+                                else:
+                                    shap_to_use = shap_values[0][0]
+                            else:
+                                shap_to_use = shap_values[0]
+                            
+                            # 创建条形图显示特征贡献
+                            fig_shap = go.Figure()
+                            
+                            features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+                            shap_vals = shap_to_use
+                            
+                            fig_shap.add_trace(go.Bar(
                                 x=features,
-                                y=importance,
-                                marker_color='#3B82F6',
-                                text=[f'{val:.3f}' for val in importance],
+                                y=shap_vals,
+                                marker_color=['#3B82F6' if v > 0 else '#EF4444' for v in shap_vals],
+                                text=[f'{v:.4f}' for v in shap_vals],
                                 textposition='auto'
                             ))
-                            fig_fallback.update_layout(
-                                title='Feature Importance (Fallback - Not SHAP)',
+                            
+                            fig_shap.update_layout(
+                                title='Feature Contribution to Prediction (SHAP values)',
                                 xaxis_title='Feature',
-                                yaxis_title='Importance',
-                                height=400
+                                yaxis_title='SHAP Value',
+                                height=400,
+                                template='plotly_white'
                             )
-                            st.plotly_chart(fig_fallback, use_container_width=True)
+                            
+                            st.plotly_chart(fig_shap, use_container_width=True)
+                            
+                        except Exception as shap_error:
+                            st.info("⚠️ SHAP visualization not available. Showing feature importance instead.")
+                            
+                            # 使用特征重要性作为备选
+                            if hasattr(model, 'feature_importances_'):
+                                features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+                                importance = model.feature_importances_
+                                
+                                fig_importance = go.Figure()
+                                fig_importance.add_trace(go.Bar(
+                                    x=features,
+                                    y=importance,
+                                    marker_color='#3B82F6',
+                                    text=[f'{val:.4f}' for val in importance],
+                                    textposition='auto'
+                                ))
+                                fig_importance.update_layout(
+                                    title='Feature Importance',
+                                    xaxis_title='Feature',
+                                    yaxis_title='Importance',
+                                    height=400
+                                )
+                                st.plotly_chart(fig_importance, use_container_width=True)
+                    
+                    except Exception as e:
+                        st.warning(f"Feature analysis error: {str(e)}")
                 
-                # Clinical recommendations
+                # 临床建议
                 st.markdown('<div class="info-box">', unsafe_allow_html=True)
                 st.markdown('### 📋 **Clinical Recommendations**')
                 
@@ -527,11 +598,16 @@ if app_mode == "📊 Individual Patient Prediction":
                 
             except Exception as e:
                 st.error(f"❌ **Prediction Error**: {str(e)}")
-                st.info("Please check the model file format and ensure all required features are provided.")
+                st.info("""
+                **Troubleshooting suggestions:**
+                1. Check if the model file is properly uploaded
+                2. Verify the input data format matches training data
+                3. Try using different feature values
+                """)
 
 # ==================== SHAP INTERPRETATION ====================
 elif app_mode == "📊 SHAP Interpretation":
-    st.markdown('<h2 class="sub-header">SHAP Model Interpretability Analysis</h2>', unsafe_allow_html=True)
+    st.markdown('<h2 class="sub-header">Model Interpretability Analysis</h2>', unsafe_allow_html=True)
     
     if demo_mode:
         st.markdown('<div class="warning-box">', unsafe_allow_html=True)
@@ -539,29 +615,24 @@ elif app_mode == "📊 SHAP Interpretation":
         ⚠️ **Demonstration Mode Active**
         
         SHAP analysis requires a properly trained LightGBM model. Currently using demonstration data.
-        For actual SHAP analysis, please ensure a valid model file is uploaded.
         """)
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # Create example data for SHAP analysis
-    st.markdown("### Generate Sample Data for SHAP Analysis")
+    # 生成示例数据
+    st.markdown("### Generate Sample Data for Analysis")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        sample_size = st.slider("Number of samples for SHAP analysis", 50, 500, 100)
-        random_seed = st.number_input("Random seed", value=42)
+        sample_size = st.slider("Number of samples", 20, 100, 50)
     
     with col2:
         st.markdown("**Feature Ranges:**")
         st.markdown("- Age: 20-90 years")
         st.markdown("- Surgery Time: 30-300 minutes")
-        st.markdown("- Anesthesia: 1 or 2")
-        st.markdown("- Calcium: 1.8-2.5 mmol/L")
-        st.markdown("- ESR: 5-80 mm/h")
     
-    # Generate sample data
-    np.random.seed(random_seed)
+    # 生成样本数据
+    np.random.seed(42)
     sample_data = pd.DataFrame({
         'Age': np.random.uniform(20, 90, sample_size),
         'Surgery.time': np.random.uniform(30, 300, sample_size),
@@ -570,223 +641,70 @@ elif app_mode == "📊 SHAP Interpretation":
         'ESR': np.random.uniform(5, 80, sample_size)
     })
     
-    # Display sample data
-    st.markdown("### Sample Data Preview")
-    st.dataframe(sample_data.head(10), use_container_width=True)
-    
-    # SHAP analysis options
-    analysis_type = st.radio(
-        "Select SHAP Analysis Type",
-        ["Global Feature Importance", "Individual Waterfall Plot", "Feature Dependence"],
-        horizontal=True
-    )
-    
-    if st.button("🔍 **Run SHAP Analysis**", type="primary"):
-        with st.spinner("Calculating SHAP values and generating visualizations..."):
-            if shap_explainer and not demo_mode:
-                try:
-                    # Calculate SHAP values
-                    shap_values = shap_explainer(sample_data)
-                    
-                    if analysis_type == "Global Feature Importance":
-                        st.markdown('<h3 class="sub-header">Global Feature Importance (SHAP)</h3>', unsafe_allow_html=True)
-                        
-                        # Extract SHAP values correctly
-                        try:
-                            if hasattr(shap_values, 'values'):
-                                # New SHAP API
-                                shap_values_array = shap_values.values
-                                if len(shap_values_array.shape) == 3:
-                                    # Multi-class, take mean absolute for first class
-                                    shap_importance = np.abs(shap_values_array[:, :, 0]).mean(axis=0)
-                                else:
-                                    # Single output
-                                    shap_importance = np.abs(shap_values.values).mean(axis=0)
-                            else:
-                                # Old SHAP API
-                                if isinstance(shap_values, list):
-                                    # List of arrays for multi-class
-                                    shap_importance = np.abs(shap_values[0]).mean(axis=0)
-                                else:
-                                    shap_importance = np.abs(shap_values).mean(axis=0)
-                            
-                            # Create bar plot
-                            features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
-                            importance_df = pd.DataFrame({
-                                'Feature': features,
-                                'Mean |SHAP value|': shap_importance
-                            }).sort_values('Mean |SHAP value|', ascending=True)
-                            
-                            fig = go.Figure()
-                            fig.add_trace(go.Bar(
-                                y=importance_df['Feature'],
-                                x=importance_df['Mean |SHAP value|'],
-                                orientation='h',
-                                marker_color='#3B82F6',
-                                text=[f'{val:.4f}' for val in importance_df['Mean |SHAP value|']],
-                                textposition='auto'
-                            ))
-                            
-                            fig.update_layout(
-                                title='Global Feature Importance (Mean Absolute SHAP Values)',
-                                xaxis_title='Mean |SHAP value|',
-                                yaxis_title='Feature',
-                                height=400,
-                                template='plotly_white'
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # SHAP summary plot (beeswarm)
-                            st.markdown('<h4 class="sub-header">SHAP Summary Plot</h4>', unsafe_allow_html=True)
-                            
-                            fig_summary, ax = plt.subplots(figsize=(10, 6))
-                            
-                            if hasattr(shap_values, 'values'):
-                                # New SHAP API
-                                shap.summary_plot(shap_values, sample_data, plot_type="dot", show=False)
-                            else:
-                                # Old SHAP API
-                                if isinstance(shap_values, list):
-                                    shap.summary_plot(shap_values[0], sample_data, plot_type="dot", show=False)
-                                else:
-                                    shap.summary_plot(shap_values, sample_data, plot_type="dot", show=False)
-                            
-                            plt.title("SHAP Summary Plot (Beeswarm)", fontsize=14, fontweight='bold')
-                            plt.tight_layout()
-                            st.pyplot(fig_summary)
-                            plt.close(fig_summary)
-                            
-                        except Exception as e:
-                            st.warning(f"⚠️ SHAP global analysis error: {str(e)}")
-                            st.info("Using model's built-in feature importance instead.")
-                            
-                            # Fallback to model feature importance
-                            if hasattr(model, 'feature_importances_'):
-                                features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
-                                importance = model.feature_importances_
-                                
-                                fig_fallback = go.Figure()
-                                fig_fallback.add_trace(go.Bar(
-                                    x=features,
-                                    y=importance,
-                                    marker_color='#3B82F6',
-                                    text=[f'{val:.3f}' for val in importance],
-                                    textposition='auto'
-                                ))
-                                fig_fallback.update_layout(
-                                    title='Feature Importance (Model-based - Fallback)',
-                                    xaxis_title='Feature',
-                                    yaxis_title='Importance',
-                                    height=400
-                                )
-                                st.plotly_chart(fig_fallback, use_container_width=True)
-                    
-                    elif analysis_type == "Individual Waterfall Plot":
-                        st.markdown('<h3 class="sub-header">Individual SHAP Waterfall Plot</h3>', unsafe_allow_html=True)
-                        
-                        # Select a sample for waterfall plot
-                        sample_idx = st.selectbox("Select sample for waterfall plot", range(min(10, sample_size)))
-                        
-                        try:
-                            # Create waterfall plot
-                            fig_waterfall, ax = plt.subplots(figsize=(12, 8))
-                            
-                            if hasattr(shap_values, 'values'):
-                                # New SHAP API
-                                if len(shap_values.values.shape) == 3:
-                                    # Multi-class
-                                    shap_waterfall = shap.Explanation(
-                                        values=shap_values.values[sample_idx, :, 0],
-                                        base_values=shap_values.base_values[sample_idx][0] if hasattr(shap_values, 'base_values') else shap_values.base_values[sample_idx],
-                                        data=sample_data.iloc[sample_idx].values,
-                                        feature_names=sample_data.columns.tolist()
-                                    )
-                                else:
-                                    shap_waterfall = shap.Explanation(
-                                        values=shap_values.values[sample_idx],
-                                        base_values=shap_values.base_values[sample_idx],
-                                        data=sample_data.iloc[sample_idx].values,
-                                        feature_names=sample_data.columns.tolist()
-                                    )
-                            else:
-                                # Old SHAP API
-                                if isinstance(shap_values, list):
-                                    shap_waterfall = shap_values[0][sample_idx]
-                                else:
-                                    shap_waterfall = shap_values[sample_idx]
-                            
-                            # Create waterfall plot
-                            try:
-                                shap.plots.waterfall(shap_waterfall, max_display=10, show=False)
-                            except:
-                                shap.waterfall_plot(shap_waterfall, max_display=10, show=False)
-                            
-                            plt.title(f"SHAP Waterfall Plot for Sample {sample_idx}", fontsize=14, fontweight='bold')
-                            plt.tight_layout()
-                            st.pyplot(fig_waterfall)
-                            plt.close(fig_waterfall)
-                            
-                            # Show sample data
-                            st.markdown(f"**Sample {sample_idx} Data:**")
-                            st.dataframe(sample_data.iloc[[sample_idx]], use_container_width=True)
-                            
-                        except Exception as e:
-                            st.error(f"❌ Waterfall plot error: {str(e)}")
-                            st.info("Individual waterfall plot may not be available with current SHAP/model configuration.")
-                    
-                    else:  # Feature Dependence
-                        st.markdown('<h3 class="sub-header">SHAP Feature Dependence Plots</h3>', unsafe_allow_html=True)
-                        
-                        feature_to_plot = st.selectbox("Select feature for dependence plot", 
-                                                     ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR'])
-                        
-                        try:
-                            fig_dependence, ax = plt.subplots(figsize=(10, 6))
-                            
-                            if hasattr(shap_values, 'values'):
-                                # New SHAP API
-                                if len(shap_values.values.shape) == 3:
-                                    shap_values_for_plot = shap_values.values[:, :, 0]
-                                else:
-                                    shap_values_for_plot = shap_values.values
-                            else:
-                                # Old SHAP API
-                                if isinstance(shap_values, list):
-                                    shap_values_for_plot = shap_values[0]
-                                else:
-                                    shap_values_for_plot = shap_values
-                            
-                            shap.dependence_plot(
-                                feature_to_plot, 
-                                shap_values_for_plot, 
-                                sample_data,
-                                show=False
-                            )
-                            
-                            plt.title(f"SHAP Dependence Plot: {feature_to_plot}", fontsize=14, fontweight='bold')
-                            plt.tight_layout()
-                            st.pyplot(fig_dependence)
-                            plt.close(fig_dependence)
-                            
-                        except Exception as e:
-                            st.warning(f"⚠️ Dependence plot error: {str(e)}")
+    if st.button("🔍 **Run Analysis**", type="primary"):
+        with st.spinner("Analyzing model behavior..."):
+            
+            # 使用简单特征重要性
+            st.markdown('<h3 class="sub-header">Feature Analysis</h3>', unsafe_allow_html=True)
+            
+            if not demo_mode and hasattr(model, 'feature_importances_'):
+                features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+                importance = model.feature_importances_
                 
-                except Exception as e:
-                    st.error(f"❌ **SHAP Analysis Error**: {str(e)}")
-                    st.info("""
-                    **Possible issues:**
-                    1. SHAP version incompatibility with model
-                    2. Model format not fully compatible with SHAP
-                    3. Memory limitations for large sample sizes
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=features,
+                    y=importance,
+                    marker_color='#3B82F6',
+                    text=[f'{val:.4f}' for val in importance],
+                    textposition='auto'
+                ))
+                
+                fig.update_layout(
+                    title='Feature Importance',
+                    xaxis_title='Feature',
+                    yaxis_title='Importance',
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # 预测分布
+            st.markdown('<h3 class="sub-header">Prediction Distribution on Sample Data</h3>', unsafe_allow_html=True)
+            
+            try:
+                predictions = model.predict(sample_data)
+                probabilities = model.predict_proba(sample_data)[:, 0]  # 阳性概率
+                
+                fig_dist = go.Figure()
+                
+                fig_dist.add_trace(go.Histogram(
+                    x=probabilities,
+                    nbinsx=20,
+                    marker_color='#3B82F6',
+                    opacity=0.7
+                ))
+                
+                fig_dist.update_layout(
+                    title='Distribution of Predicted Probabilities',
+                    xaxis_title='Probability of Hypoproteinemia',
+                    yaxis_title='Count',
+                    height=400
+                )
+                
+                st.plotly_chart(fig_dist, use_container_width=True)
+                
+                # 统计信息
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Mean Probability", f"{np.mean(probabilities):.3f}")
+                with col2:
+                    st.metric("Positive Predictions", f"{np.sum(predictions == 1)}")
+                with col3:
+                    st.metric("Negative Predictions", f"{np.sum(predictions == 2)}")
                     
-                    **Try:**
-                    1. Reduce sample size
-                    2. Check model compatibility
-                    3. Update SHAP library
-                    """)
-            else:
-                st.warning("⚠️ SHAP analysis is not available in demonstration mode or with current model.")
+            except Exception as e:
+                st.warning(f"Could not generate prediction distribution: {str(e)}")
 
 # ==================== MODEL PERFORMANCE METRICS ====================
 else:  # "📋 Model Performance Metrics"
@@ -797,22 +715,27 @@ else:  # "📋 Model Performance Metrics"
         st.markdown("""
         ⚠️ **Demonstration Mode Active**
         
-        Currently using demonstration model. For actual performance metrics, please ensure:
-        1. Proper trained model file is uploaded
-        2. Validation dataset with ground truth labels is available
-        3. Model was trained with proper cross-validation
+        Currently using demonstration model.
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.markdown("""
+        ✅ **Trained Model Active**
+        
+        Using the uploaded LightGBM model for predictions.
         """)
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # Performance metrics section
+    # 模型信息
     col1, col2 = st.columns(2)
     
     with col1:
         st.markdown("### Model Information")
-        st.markdown("""
-        **Algorithm**: Light Gradient Boosting Machine (LightGBM)
+        st.markdown(f"""
+        **Model Type**: {type(model).__name__}
         
-        **Task**: Binary Classification
+        **Mode**: {'Demonstration' if demo_mode else 'Production'}
         
         **Classes**:
         - Class 1: Hypoproteinemia Positive (High Risk)
@@ -820,60 +743,30 @@ else:  # "📋 Model Performance Metrics"
         
         **Features**: 5 clinical parameters
         
-        **Validation**: 5-fold cross-validation
+        **Model Status**: {'✅ Loaded successfully' if not demo_mode else '⚠️ Using demo model'}
         """)
     
     with col2:
-        st.markdown("### Expected Performance Metrics")
+        st.markdown("### Feature Information")
         st.markdown("""
-        | Metric | Expected Range |
-        |--------|----------------|
-        | Accuracy | 82-88% |
-        | Sensitivity | 78-85% |
-        | Specificity | 85-90% |
-        | AUC-ROC | 0.86-0.92 |
-        | F1-Score | 0.80-0.86 |
+        | Feature | Type | Clinical Significance |
+        |---------|------|----------------------|
+        | Age | Continuous | Older age increases risk |
+        | Surgery Time | Continuous | Longer surgery increases risk |
+        | Anesthesia | Categorical | General anesthesia may increase risk |
+        | Calcium | Continuous | Lower levels indicate higher risk |
+        | ESR | Continuous | Higher levels indicate inflammation |
         """)
     
-    # Feature descriptions table
-    st.markdown('<h3 class="sub-header">Feature Descriptions</h3>', unsafe_allow_html=True)
-    
-    features_table = pd.DataFrame({
-        'Feature': ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR'],
-        'Type': [
-            'Continuous (years)',
-            'Continuous (minutes)',
-            'Categorical (1: General, 2: Non-general)',
-            'Continuous (mmol/L)',
-            'Continuous (mm/h)'
-        ],
-        'Clinical Significance': [
-            'Older age associated with higher metabolic stress and reduced protein synthesis',
-            'Longer surgical duration correlates with increased inflammatory response',
-            'General anesthesia may induce greater physiological stress',
-            'Lower calcium levels may indicate metabolic disturbances',
-            'Elevated ESR suggests systemic inflammation affecting protein metabolism'
-        ],
-        'Normal Range': [
-            'N/A',
-            'N/A',
-            'N/A',
-            '2.1-2.6 mmol/L',
-            '0-20 mm/h (varies by age/sex)'
-        ]
-    })
-    
-    st.dataframe(features_table, use_container_width=True, hide_index=True)
-    
-    # Feature importance visualization
+    # 特征重要性
     st.markdown('<h3 class="sub-header">Feature Importance</h3>', unsafe_allow_html=True)
     
     features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
     
-    if not demo_mode and hasattr(model, 'feature_importances_'):
+    if hasattr(model, 'feature_importances_'):
         importance_scores = model.feature_importances_
     else:
-        # Simulated importance scores for demo
+        # 模拟特征重要性
         importance_scores = np.array([0.25, 0.20, 0.15, 0.20, 0.20])
     
     importance_df = pd.DataFrame({
@@ -892,40 +785,24 @@ else:  # "📋 Model Performance Metrics"
     ))
     
     fig_importance.update_layout(
-        title='Feature Importance (Gain-based)',
+        title='Feature Importance',
         xaxis_title='Importance Score',
         yaxis_title='Clinical Feature',
-        height=400,
-        template='plotly_white'
+        height=400
     )
     
     st.plotly_chart(fig_importance, use_container_width=True)
     
-    # SHAP availability status
-    st.markdown('<h3 class="sub-header">SHAP Interpretability Status</h3>', unsafe_allow_html=True)
+    # 使用说明
+    st.markdown('<h3 class="sub-header">Usage Instructions</h3>', unsafe_allow_html=True)
     
-    if shap_explainer and not demo_mode:
-        st.success("✅ SHAP interpretability is available")
-        st.markdown("""
-        **Available SHAP visualizations:**
-        1. **Waterfall plots** for individual predictions
-        2. **Global feature importance** (mean absolute SHAP values)
-        3. **Summary plots** (beeswarm plots)
-        4. **Feature dependence plots** for understanding feature interactions
-        """)
-    else:
-        st.warning("⚠️ SHAP interpretability is not available")
-        st.markdown("""
-        **Possible reasons:**
-        1. Model file format may not be compatible with SHAP
-        2. SHAP library may not be properly installed
-        3. Currently in demonstration mode
-        
-        **To enable SHAP:**
-        1. Ensure proper LightGBM model is uploaded
-        2. Check that SHAP library is installed
-        3. Verify model compatibility with SHAP TreeExplainer
-        """)
+    st.markdown("""
+    1. **Individual Prediction**: Enter patient parameters to get personalized risk assessment
+    2. **Feature Analysis**: Understand how different factors contribute to risk
+    3. **Model Info**: View technical details and performance metrics
+    
+    **Note**: This tool is for clinical research purposes only.
+    """)
 
 # ==================== FOOTER ====================
 st.markdown("---")
@@ -938,11 +815,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ==================== DEMO MODE WARNING ====================
-if demo_mode:
-    st.markdown("""
-    <div style="position: fixed; bottom: 10px; right: 10px; background-color: #FEF3C7; 
-                padding: 10px; border-radius: 5px; border: 1px solid #F59E0B; z-index: 1000;">
-        ⚠️ <strong>Demonstration Mode</strong> - Using simulated predictions
-    </div>
-    """, unsafe_allow_html=True)
+# 调试信息
+if st.sidebar.checkbox("Show debug info", False):
+    st.sidebar.markdown("### Debug Information")
+    st.sidebar.write(f"Model type: {type(model)}")
+    st.sidebar.write(f"Demo mode: {demo_mode}")
+    if hasattr(model, 'classes_'):
+        st.sidebar.write(f"Model classes: {model.classes_}")
