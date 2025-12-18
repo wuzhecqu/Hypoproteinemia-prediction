@@ -1,278 +1,422 @@
-# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
+import joblib
 import shap
-import plotly.express as px
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-from sklearn.metrics import roc_auc_score, accuracy_score, recall_score
-import warnings
-warnings.filterwarnings('ignore')
+from plotly.subplots import make_subplots
+from lightgbm import LGBMClassifier
 
-# Page config
+# 设置页面配置
 st.set_page_config(
-    page_title="Hypoproteinemia Risk Predictor",
+    page_title="术后低蛋白血症预测系统",
     page_icon="🏥",
     layout="wide"
 )
 
-# Title
-st.title("🏥 Hypoproteinemia Risk Prediction after Surgery")
-st.markdown("""
-This tool predicts the risk of **Hypoproteinemia** in patients after surgery based on clinical features.  
-The model is built with **LightGBM** and validated on clinical data.
-""")
+# 应用标题
+st.title("🏥 术后低蛋白血症风险预测系统")
+st.markdown("---")
 
-# Sidebar for navigation
-st.sidebar.header("Navigation")
-option = st.sidebar.selectbox(
-    "Choose a page",
-    ["📊 Single Patient Prediction", "📈 Model Interpretability", "📁 Validation Set Evaluation"]
-)
-
-# ====================== 1. Load Model from GitHub (or local) ======================
+# 缓存加载模型
 @st.cache_resource
 def load_model():
-    # Option 1: Load from local (for development)
     try:
+        # 尝试从pickle文件加载模型
         with open('lgb_model_weights.pkl', 'rb') as f:
-            model_meta = pickle.load(f)
-        st.sidebar.success("✅ Model loaded from local file")
-    except:
-        # Option 2: Load from GitHub raw URL
-        github_url = "https://github.com/wuzhecqu/Hypoproteinemia-prediction/blob/main/lgb_model_weights.pkl"
-        import requests
-        response = requests.get(github_url)
-        if response.status_code == 200:
-            model_meta = pickle.loads(response.content)
-            st.sidebar.success("✅ Model loaded from GitHub")
-        else:
-            st.error("❌ Model file not found. Please check the URL or local path.")
-            st.stop()
-    return model_meta
-
-model_meta = load_model()
-model = model_meta['model']
-imputer = model_meta['imputer']
-scaler = model_meta['scaler']
-feature_cols = model_meta['feature_cols']
-target_mapping = model_meta['target_mapping']
-feature_descriptions = model_meta['feature_descriptions']
-
-# ====================== 2. Single Patient Prediction ======================
-if option == "📊 Single Patient Prediction":
-    st.header("Single Patient Prediction")
-    st.markdown("Enter patient clinical features below to predict Hypoproteinemia risk.")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        Age = st.number_input("Age (years)", min_value=0, max_value=120, value=60)
-        Surgery_time = st.number_input("Surgery Duration (minutes)", min_value=0, max_value=600, value=120)
-        Anesthesia = st.selectbox("Anesthesia Type", options=[1, 2], index=0,
-                                  help="1: General, 2: Spinal, 3: Local")
-
-    with col2:
-        Calcium = st.number_input("Serum Calcium (mmol/L)", min_value=1.0, max_value=3.0, value=2.2, step=0.1)
-        ESR = st.number_input("ESR (mm/h)", min_value=0, max_value=150, value=20)
-
-    if st.button("Predict Risk", type="primary"):
-        # Prepare input
-        input_df = pd.DataFrame([[Age, Surgery_time, Anesthesia, Calcium, ESR]],
-                                columns=feature_cols)
-        
-        # Preprocess
-        input_imputed = imputer.transform(input_df)
-        input_scaled = scaler.transform(input_imputed)
-        
-        # Predict
-        prob = model.predict_proba(input_scaled)[0, 1]
-        pred_class = model.predict(input_scaled)[0]
-        
-        # Display
-        st.subheader("Prediction Result")
-        
-        risk_color = "red" if prob >= 0.5 else "green"
-        st.markdown(f"**Predicted Risk Probability:** :{risk_color}[**{prob:.2%}**]")
-        st.markdown(f"**Predicted Class:** **{target_mapping[pred_class]}**")
-        
-        # Risk gauge
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=prob * 100,
-            domain={'x': [0, 1], 'y': [0, 1]},
-            title={'text': "Risk Level (%)"},
-            gauge={
-                'axis': {'range': [0, 100]},
-                'bar': {'color': "darkblue"},
-                'steps': [
-                    {'range': [0, 30], 'color': "green"},
-                    {'range': [30, 70], 'color': "yellow"},
-                    {'range': [70, 100], 'color': "red"}
-                ],
-                'threshold': {
-                    'line': {'color': "black", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 50
-                }
-            }
-        ))
-        fig.update_layout(height=300)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Feature importance for this prediction
-        st.subheader("Feature Contribution for This Prediction")
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(input_scaled)
-        
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]  # for class 1
-        
-        shap_df = pd.DataFrame({
-            'Feature': feature_cols,
-            'SHAP Value': shap_values[0],
-            'Feature Value': input_df.iloc[0].values
-        })
-        shap_df['Impact'] = shap_df['SHAP Value'].apply(lambda x: "Increases Risk" if x > 0 else "Decreases Risk")
-        
-        fig2 = px.bar(shap_df, x='SHAP Value', y='Feature', orientation='h',
-                     color='Impact', color_discrete_map={"Increases Risk": "red", "Decreases Risk": "green"},
-                     title="SHAP Values for Current Prediction")
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ====================== 3. Model Interpretability ======================
-elif option == "📈 Model Interpretability":
-    st.header("Model Interpretability Analysis")
-    
-    tab1, tab2, tab3 = st.tabs(["📊 Feature Importance", "📈 SHAP Summary", "🔍 Partial Dependence"])
-    
-    with tab1:
-        st.subheader("Global Feature Importance")
-        importance_df = pd.DataFrame({
-            'Feature': feature_cols,
-            'Importance': model.feature_importances_
-        }).sort_values('Importance', ascending=True)
-        
-        fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h',
-                     title="LightGBM Feature Importance")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.markdown("**Feature Descriptions:**")
-        for feat, desc in feature_descriptions.items():
-            st.markdown(f"- **{feat}**: {desc}")
-    
-    with tab2:
-        st.subheader("SHAP Summary Plot")
-        st.info("Loading SHAP values may take a moment...")
-        
-        # Use validation data for SHAP (load from local)
-        try:
-            df_val = pd.read_excel('validation_data.xlsx')
-            X_val_raw = df_val[feature_cols]
-            X_val_imputed = imputer.transform(X_val_raw)
-            X_val = scaler.transform(X_val_imputed)
-            
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_val)
-            
-            if isinstance(shap_values, list):
-                shap_values = shap_values[1]
-            
-            fig, ax = plt.subplots()
-            shap.summary_plot(shap_values, X_val, feature_names=feature_cols, show=False)
-            st.pyplot(fig)
-        except Exception as e:
-            st.warning(f"Could not generate SHAP plot: {e}")
-            st.markdown("Please ensure `validation_data.xlsx` is in the same directory.")
-    
-    with tab3:
-        st.subheader("Partial Dependence Plots")
-        selected_feature = st.selectbox("Select a feature for PDP", feature_cols)
-        
-        # Simplified PDP
-        try:
-            df_val = pd.read_excel('validation_data.xlsx')
-            X_val_raw = df_val[feature_cols]
-            
-            unique_vals = np.linspace(X_val_raw[selected_feature].min(), X_val_raw[selected_feature].max(), 50)
-            pdp_vals = []
-            
-            for val in unique_vals:
-                temp_df = X_val_raw.copy()
-                temp_df[selected_feature] = val
-                temp_imputed = imputer.transform(temp_df)
-                temp_scaled = scaler.transform(temp_imputed)
-                preds = model.predict_proba(temp_scaled)[:, 1]
-                pdp_vals.append(preds.mean())
-            
-            pdp_df = pd.DataFrame({'Feature Value': unique_vals, 'Predicted Risk': pdp_vals})
-            fig = px.line(pdp_df, x='Feature Value', y='Predicted Risk',
-                         title=f"Partial Dependence for {selected_feature}")
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.warning(f"PDP not available: {e}")
-
-# ====================== 4. Validation Set Evaluation ======================
-elif option == "📁 Validation Set Evaluation":
-    st.header("Validation Set Performance")
-    
-    try:
-        df_val = pd.read_excel('validation_data.xlsx')
-        df_val.columns = [col.strip() for col in df_val.columns]
-        
-        if 'Hypoproteinemia' in df_val.columns:
-            df_val['Hypoproteinemia'] = df_val['Hypoproteinemia'].map({1: 1, 2: 0})
-            y_true = df_val['Hypoproteinemia']
-        else:
-            st.error("Target column not found in validation data.")
-            st.stop()
-        
-        X_val_raw = df_val[feature_cols]
-        X_val_imputed = imputer.transform(X_val_raw)
-        X_val = scaler.transform(X_val_imputed)
-        
-        y_pred = model.predict(X_val)
-        y_prob = model.predict_proba(X_val)[:, 1]
-        
-        auc = roc_auc_score(y_true, y_prob)
-        acc = accuracy_score(y_true, y_pred)
-        recall = recall_score(y_true, y_pred, zero_division=0)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("AUC Score", f"{auc:.3f}")
-        with col2:
-            st.metric("Accuracy", f"{acc:.3f}")
-        with col3:
-            st.metric("Recall (Sensitivity)", f"{recall:.3f}")
-        
-        # ROC Curve
-        from sklearn.metrics import roc_curve
-        fpr, tpr, _ = roc_curve(y_true, y_prob)
-        roc_df = pd.DataFrame({'FPR': fpr, 'TPR': tpr})
-        fig = px.line(roc_df, x='FPR', y='TPR', title='ROC Curve')
-        fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Confusion Matrix
-        from sklearn.metrics import confusion_matrix
-        cm = confusion_matrix(y_true, y_pred)
-        cm_df = pd.DataFrame(cm, 
-                            columns=['Predicted Negative', 'Predicted Positive'],
-                            index=['Actual Negative', 'Actual Positive'])
-        st.subheader("Confusion Matrix")
-        st.dataframe(cm_df.style.background_gradient(cmap='Blues'))
-        
-        # Show sample of validation data
-        with st.expander("View Validation Data Sample"):
-            st.dataframe(df_val.head(10))
-            
+            model = pickle.load(f)
+        st.success("✅ 模型加载成功!")
+        return model
     except Exception as e:
-        st.error(f"Error loading validation data: {e}")
-        st.markdown("Please ensure `validation_data.xlsx` is in the same directory.")
+        st.error(f"❌ 模型加载失败: {e}")
+        return None
 
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.info("**Clinical Decision Support Tool**\n\nFor research use only. Always consult with clinical professionals.")
+# 加载模型
+model = load_model()
+
+# 如果模型加载成功，显示模型信息
+if model:
+    st.sidebar.success(f"模型已加载 (LightGBM)")
+    
+    # 显示特征重要性（如果有）
+    if hasattr(model, 'feature_importances_'):
+        st.sidebar.info("特征已准备")
+    
+    # 特征描述
+    feature_descriptions = {
+        'Age': '患者年龄（岁）',
+        'Surgery.time': '手术时长（分钟）',
+        'Anesthesia': '麻醉类型（1: 全身麻醉, 2: 椎管内麻醉, 3: 局部麻醉）',
+        'Calcium': '血清钙水平（mmol/L）',
+        'ESR': '红细胞沉降率（mm/h）'
+    }
+
+# 创建标签映射
+label_map = {1: "有低蛋白血症", 2: "无低蛋白血症"}
+
+# 创建标签反向映射
+reverse_label_map = {"有低蛋白血症": 1, "无低蛋白血症": 2}
+
+# 创建标签映射用于SHAP解释
+label_map_shap = {1: 1, 2: 0}  # 1: 有低蛋白血症, 0: 无低蛋白血症
+
+# 侧边栏 - 导航
+st.sidebar.title("🔍 导航")
+app_mode = st.sidebar.selectbox(
+    "请选择功能",
+    ["📊 单样本预测", "📈 SHAP可解释性分析", "📋 验证集批量预测", "📝 使用说明"]
+)
+
+# 功能1: 单样本预测
+if app_mode == "📊 单样本预测":
+    st.header("单样本预测")
+    st.markdown("请输入患者的临床参数进行预测")
+    
+    # 创建两列布局
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        Age = st.number_input(
+            "年龄（岁）", 
+            min_value=0, 
+            max_value=120, 
+            value=50,
+            help="患者年龄"
+        )
+        
+        Surgery_time = st.number_input(
+            "手术时长（分钟）", 
+            min_value=0, 
+            max_value=600, 
+            value=120,
+            help="手术持续时间"
+        )
+        
+        Anesthesia = st.selectbox(
+            "麻醉类型",
+            ["全身麻醉", "椎管内麻醉", "局部麻醉"],
+            help="选择麻醉方式"
+        )
+    
+    with col2:
+        Calcium = st.number_input(
+            "血清钙（mmol/L）", 
+            min_value=1.0, 
+            max_value=3.5, 
+            value=2.2,
+            step=0.1,
+            help="血清钙水平"
+        )
+        
+        ESR = st.number_input(
+            "红细胞沉降率（mm/h）", 
+            min_value=0, 
+            max_value=150, 
+            value=20,
+            help="ESR值"
+        )
+    
+    # 转换麻醉类型为数值
+    anesthesia_map = {"全身麻醉": 1, "椎管内麻醉": 2, "局部麻醉": 3}
+    Anesthesia_numeric = anesthesia_map[Anesthesia]
+    
+    # 创建输入数据框
+    input_data = pd.DataFrame({
+        'Age': [Age],
+        'Surgery.time': [Surgery_time],
+        'Anesthesia': [Anesthesia_numeric],
+        'Calcium': [Calcium],
+        'ESR': [ESR]
+    })
+    
+    # 预测按钮
+    if st.button("🔮 开始预测", type="primary"):
+        if model:
+            try:
+                # 进行预测
+                prediction = model.predict(input_data)[0]
+                prediction_proba = model.predict_proba(input_data)[0]
+                
+                # 获取预测概率
+                prob_class1 = prediction_proba[0]  # 有低蛋白血症的概率
+                prob_class2 = prediction_proba[1]  # 无低蛋白血症的概率
+                
+                # 显示结果
+                st.markdown("---")
+                st.subheader("📋 预测结果")
+                
+                # 创建结果卡片
+                result_col1, result_col2 = st.columns(2)
+                
+                with result_col1:
+                    st.metric(
+                        label="预测类别",
+                        value=label_map[prediction],
+                        delta=f"置信度: {max(prob_class1, prob_class2)*100:.1f}%"
+                    )
+                
+                with result_col2:
+                    risk_color = "🟢" if prediction == 2 else "🔴"
+                    st.metric(
+                        label="风险评估",
+                        value=f"{risk_color} {'低风险' if prediction == 2 else '高风险'}"
+                    )
+                
+                # 显示概率分布
+                st.subheader("📊 概率分布")
+                
+                # 创建概率条形图
+                fig_prob = go.Figure()
+                
+                fig_prob.add_trace(go.Bar(
+                    x=['有低蛋白血症', '无低蛋白血症'],
+                    y=[prob_class1, prob_class2],
+                    text=[f'{prob_class1*100:.1f}%', f'{prob_class2*100:.1f}%'],
+                    textposition='auto',
+                    marker_color=['#EF553B', '#00CC96']
+                ))
+                
+                fig_prob.update_layout(
+                    title='预测概率分布',
+                    xaxis_title='类别',
+                    yaxis_title='概率',
+                    yaxis=dict(range=[0, 1]),
+                    height=400
+                )
+                
+                st.plotly_chart(fig_prob, use_container_width=True)
+                
+                # 显示输入值
+                st.subheader("📝 输入参数")
+                input_display = input_data.copy()
+                input_display['麻醉类型'] = Anesthesia
+                st.dataframe(input_display.drop('Anesthesia', axis=1), use_container_width=True)
+                
+            except Exception as e:
+                st.error(f"预测过程中出现错误: {e}")
+
+# 功能2: SHAP可解释性分析
+elif app_mode == "📈 SHAP可解释性分析":
+    st.header("SHAP可解释性分析")
+    st.markdown("此功能用于解释模型预测结果")
+    
+    if model:
+        # 创建示例数据或使用用户输入
+        st.info("🔍 请先使用单样本预测功能生成预测，然后分析可解释性")
+        
+        # 获取特征名称
+        feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+        
+        # 创建示例数据
+        example_data = pd.DataFrame({
+            'Age': [60],
+            'Surgery.time': [180],
+            'Anesthesia': [1],
+            'Calcium': [2.0],
+            'ESR': [35]
+        })
+        
+        # 计算SHAP值
+        try:
+            # 创建SHAP解释器
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(example_data)
+            
+            # 显示SHAP摘要图
+            st.subheader("📊 SHAP特征重要性")
+            
+            # 创建SHAP值的条形图
+            if isinstance(shap_values, list):
+                # 对于分类问题，取第一个类别的SHAP值
+                shap_array = shap_values[0][0]
+            else:
+                shap_array = shap_values[0]
+            
+            # 创建特征重要性数据框
+            shap_df = pd.DataFrame({
+                '特征': feature_names,
+                'SHAP值': np.abs(shap_array),
+                '方向': ['正向' if x > 0 else '负向' for x in shap_array]
+            }).sort_values('SHAP值', ascending=True)
+            
+            # 创建水平条形图
+            fig_shap = go.Figure()
+            
+            colors = ['#00CC96' if dir == '正向' else '#EF553B' for dir in shap_df['方向']]
+            
+            fig_shap.add_trace(go.Bar(
+                y=shap_df['特征'],
+                x=shap_df['SHAP值'],
+                orientation='h',
+                marker_color=colors,
+                text=[f'{val:.3f}' for val in shap_df['SHAP值']],
+                textposition='auto'
+            ))
+            
+            fig_shap.update_layout(
+                title='特征对预测结果的影响程度',
+                xaxis_title='SHAP值（绝对值）',
+                yaxis_title='特征',
+                height=400
+            )
+            
+            st.plotly_chart(fig_shap, use_container_width=True)
+            
+            # 解释说明
+            st.subheader("📝 解释说明")
+            st.markdown("""
+            **SHAP值解释：**
+            - **正值（绿色）**：增加该特征值会提高"有低蛋白血症"的风险
+            - **负值（红色）**：增加该特征值会降低"有低蛋白血症"的风险
+            
+            **特征说明：**
+            1. **ESR**：红细胞沉降率，数值越高通常表示炎症反应越强
+            2. **年龄**：年龄越大，术后并发症风险可能越高
+            3. **手术时长**：手术时间越长，身体应激反应可能越强
+            4. **血清钙**：钙离子参与多种生理过程，异常值可能影响恢复
+            5. **麻醉类型**：不同麻醉方式对生理影响不同
+            """)
+            
+        except Exception as e:
+            st.warning(f"SHAP分析遇到问题: {e}")
+            st.info("这可能是由于SHAP版本兼容性问题。您仍然可以使用模型进行预测。")
+
+# 功能3: 验证集批量预测
+elif app_mode == "📋 验证集批量预测":
+    st.header("验证集批量预测")
+    
+    # 上传验证集文件
+    uploaded_file = st.file_uploader(
+        "上传验证集Excel文件", 
+        type=['xlsx', 'xls'],
+        help="请上传包含以下列的Excel文件：Age, Surgery.time, Anesthesia, Calcium, ESR"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # 读取Excel文件
+            validation_data = pd.read_excel(uploaded_file)
+            
+            # 检查必要的列
+            required_columns = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+            missing_columns = [col for col in required_columns if col not in validation_data.columns]
+            
+            if missing_columns:
+                st.error(f"文件缺少以下必要列: {missing_columns}")
+            else:
+                # 显示数据预览
+                st.subheader("📊 数据预览")
+                st.dataframe(validation_data.head(10), use_container_width=True)
+                st.info(f"数据形状: {validation_data.shape[0]} 行 × {validation_data.shape[1]} 列")
+                
+                # 预测按钮
+                if st.button("🔮 批量预测", type="primary"):
+                    if model:
+                        with st.spinner("正在进行批量预测..."):
+                            # 进行预测
+                            predictions = model.predict(validation_data[required_columns])
+                            prediction_probas = model.predict_proba(validation_data[required_columns])
+                            
+                            # 添加预测结果到数据框
+                            results_df = validation_data.copy()
+                            results_df['预测结果'] = [label_map[p] for p in predictions]
+                            results_df['有低蛋白血症概率'] = prediction_probas[:, 0]
+                            results_df['无低蛋白血症概率'] = prediction_probas[:, 1]
+                            
+                            # 计算准确率（如果有真实标签）
+                            if 'Hypoproteinemia' in results_df.columns:
+                                results_df['真实结果'] = [label_map.get(int(x), f"未知({x})") 
+                                                        if pd.notna(x) else "未知" 
+                                                        for x in results_df['Hypoproteinemia']]
+                                results_df['预测正确'] = results_df['预测结果'] == results_df['真实结果']
+                                accuracy = results_df['预测正确'].mean() * 100
+                                
+                                st.success(f"✅ 批量预测完成！准确率: {accuracy:.2f}%")
+                            else:
+                                st.success("✅ 批量预测完成！")
+                            
+                            # 显示预测结果
+                            st.subheader("📋 预测结果")
+                            st.dataframe(results_df, use_container_width=True)
+                            
+                            # 统计预测分布
+                            st.subheader("📈 预测结果分布")
+                            
+                            prediction_counts = results_df['预测结果'].value_counts()
+                            fig_dist = go.Figure(data=[
+                                go.Pie(
+                                    labels=prediction_counts.index,
+                                    values=prediction_counts.values,
+                                    hole=.3
+                                )
+                            ])
+                            
+                            fig_dist.update_layout(
+                                title='预测结果分布'
+                            )
+                            
+                            st.plotly_chart(fig_dist, use_container_width=True)
+                            
+                            # 提供下载链接
+                            csv = results_df.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button(
+                                label="📥 下载预测结果 (CSV)",
+                                data=csv,
+                                file_name="batch_prediction_results.csv",
+                                mime="text/csv"
+                            )
+        
+        except Exception as e:
+            st.error(f"读取文件时出错: {e}")
+
+# 功能4: 使用说明
+else:
+    st.header("📝 使用说明")
+    
+    st.markdown("""
+    ## 术后低蛋白血症预测系统使用指南
+    
+    ### 📊 单样本预测
+    1. 在左侧导航栏选择"📊 单样本预测"
+    2. 输入患者的临床参数：
+       - **年龄**：患者年龄（岁）
+       - **手术时长**：手术持续时间（分钟）
+       - **麻醉类型**：选择麻醉方式
+       - **血清钙**：血清钙水平（mmol/L）
+       - **ESR**：红细胞沉降率（mm/h）
+    3. 点击"🔮 开始预测"按钮
+    4. 查看预测结果和概率分布
+    
+    ### 📈 SHAP可解释性分析
+    1. 在左侧导航栏选择"📈 SHAP可解释性分析"
+    2. 系统将展示特征对预测结果的影响程度
+    3. 了解哪些因素对预测结果贡献最大
+    
+    ### 📋 验证集批量预测
+    1. 在左侧导航栏选择"📋 验证集批量预测"
+    2. 上传包含患者数据的Excel文件
+    3. 文件应包含以下列：Age, Surgery.time, Anesthesia, Calcium, ESR
+    4. 点击"🔮 批量预测"按钮
+    5. 查看和下载预测结果
+    
+    ### 📁 文件要求
+    - 模型文件：`lgb_model_weights.pkl`
+    - 验证集文件：Excel格式，包含必要的临床参数
+    
+    ### ⚠️ 注意事项
+    - 确保输入数据在合理范围内
+    - 模型预测结果仅供参考，实际临床决策需结合专业知识
+    - 如遇问题，请检查文件格式和数据完整性
+    """)
+
+# 页面底部信息
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: gray;'>
+    <p>术后低蛋白血症预测系统 v1.0 | 仅供临床研究参考使用</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
