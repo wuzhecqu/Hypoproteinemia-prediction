@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import pickle
 import shap
-import matplotlib.pyplot as plt
 import plotly.express as px
+import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from sklearn.metrics import roc_auc_score, accuracy_score, recall_score
 import warnings
@@ -72,7 +72,7 @@ if option == "📊 Single Patient Prediction":
         Age = st.number_input("Age (years)", min_value=0, max_value=120, value=60)
         Surgery_time = st.number_input("Surgery Duration (minutes)", min_value=0, max_value=600, value=120)
         Anesthesia = st.selectbox("Anesthesia Type", options=[1, 2], index=0,
-                                  help="1: General, 2: Spinal")
+                                  help="1: General, 2: Spinal, 3: Local")
 
     with col2:
         Calcium = st.number_input("Serum Calcium (mmol/L)", min_value=1.0, max_value=3.0, value=2.2, step=0.1)
@@ -275,6 +275,4 @@ elif option == "📁 Validation Set Evaluation":
 
 # Footer
 st.sidebar.markdown("---")
-
 st.sidebar.info("**Clinical Decision Support Tool**\n\nFor research use only. Always consult with clinical professionals.")
-
