@@ -824,4 +824,3 @@ st.markdown("""
     <p>© 2024 Clinical Research Division | For Research Use Only</p>
 </div>
 """, unsafe_allow_html=True)
-
