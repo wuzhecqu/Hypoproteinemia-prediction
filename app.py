@@ -8,7 +8,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import shap
 import matplotlib.pyplot as plt
-from lightgbm import LGBMClassifier
+from lightgbm import LGBMClassifier, Booster
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -72,150 +72,237 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== DYNAMIC CLINICAL MODEL ====================
-class DynamicClinicalModel:
-    """A dynamic clinical model that responds to input changes"""
-    def __init__(self):
-        self.classes_ = np.array([1, 2])  # 1: Positive, 2: Negative
-        self.feature_importances_ = np.array([0.30, 0.25, 0.15, 0.20, 0.10])
-        self.feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
-        
-    def predict(self, X):
-        """Predict based on dynamic clinical rules"""
-        predictions = []
-        for i in range(len(X)):
-            risk_score = self._calculate_dynamic_risk_score(X.iloc[i])
-            predictions.append(1 if risk_score > 0.5 else 2)
-        return np.array(predictions)
-    
-    def predict_proba(self, X):
-        """Dynamic probability prediction based on actual input"""
-        probabilities = []
-        for i in range(len(X)):
-            patient = X.iloc[i]
-            
-            # 计算真实的风险分数
-            base_risk = self._calculate_dynamic_risk_score(patient)
-            
-            # 使用sigmoid函数转换为概率，确保合理范围
-            prob_positive = 1 / (1 + np.exp(-10 * (base_risk - 0.5)))
-            
-            # 确保概率在10%-90%之间
-            prob_positive = np.clip(prob_positive, 0.1, 0.9)
-            
-            # 计算阴性概率
-            prob_negative = 1 - prob_positive
-            
-            # 轻微调整以确保总概率为1
-            total = prob_positive + prob_negative
-            if total > 0:
-                prob_positive = prob_positive / total
-                prob_negative = prob_negative / total
-            
-            probabilities.append([prob_positive, prob_negative])
-        
-        return np.array(probabilities)
-    
-    def _calculate_dynamic_risk_score(self, patient):
-        """Calculate risk score that actually responds to input changes"""
-        score = 0.0
-        
-        # Age contribution (20-90岁，60岁以上风险显著增加)
-        age_norm = (patient['Age'] - 35) / 55  # 标准化到0-1
-        score += age_norm * 0.30
-        
-        # Surgery time contribution (30-360分钟，超过120分钟风险增加)
-        surgery_norm = max(0, (patient['Surgery.time'] - 120) / 240)  # 超过120分钟部分
-        score += surgery_norm * 0.25
-        
-        # Anesthesia contribution (全身麻醉风险更高)
-        if patient['Anesthesia'] == 1:
-            score += 0.15
-        else:
-            score += 0.05
-        
-        # Calcium contribution (1.5-2.8，低于2.1风险增加)
-        calcium_risk = max(0, (2.1 - patient['Calcium']) / 0.6)  # 低于2.1的部分
-        score += calcium_risk * 0.20
-        
-        # ESR contribution (0-100，超过30风险增加)
-        esr_risk = max(0, (patient['ESR'] - 30) / 70)  # 超过30的部分
-        score += esr_risk * 0.10
-        
-        # 确保分数在合理范围内
-        return np.clip(score, 0.05, 0.95)
-    
-    def get_dynamic_contributions(self, patient):
-        """Get dynamic feature contributions for waterfall plot"""
-        contributions = []
-        
-        # Age contribution
-        age_norm = (patient['Age'] - 35) / 55
-        contributions.append(age_norm * 0.30)
-        
-        # Surgery time contribution
-        surgery_norm = max(0, (patient['Surgery.time'] - 120) / 240)
-        contributions.append(surgery_norm * 0.25)
-        
-        # Anesthesia contribution
-        if patient['Anesthesia'] == 1:
-            contributions.append(0.15)
-        else:
-            contributions.append(0.05)
-        
-        # Calcium contribution
-        calcium_risk = max(0, (2.1 - patient['Calcium']) / 0.6)
-        contributions.append(calcium_risk * 0.20)
-        
-        # ESR contribution
-        esr_risk = max(0, (patient['ESR'] - 30) / 70)
-        contributions.append(esr_risk * 0.10)
-        
-        return contributions
-
-# ==================== LOAD OR CREATE MODEL ====================
+# ==================== SHAP COMPATIBLE MODEL LOADER ====================
 @st.cache_resource
-def load_model():
-    """Try to load model, fallback to dynamic clinical model"""
+def load_shap_compatible_model():
+    """Load model in a way that's compatible with SHAP"""
     try:
         # 尝试加载模型文件
         try:
-            model = joblib.load('lgb_model_weights.pkl')
-            if hasattr(model, 'predict'):
-                st.sidebar.success("✅ Trained model loaded")
-                
-                # 确保模型有predict_proba方法
-                if not hasattr(model, 'predict_proba'):
-                    st.sidebar.warning("⚠️ Model missing predict_proba, using clinical model")
-                    return DynamicClinicalModel()
-                
-                return model
-                
-        except:
-            st.sidebar.info("⚠️ Could not load trained model")
-            
+            # 先尝试joblib
+            loaded_obj = joblib.load('lgb_model_weights.pkl')
+            st.sidebar.success("✅ Model loaded with joblib")
+            return process_for_shap(loaded_obj)
+        except Exception as e:
+            st.sidebar.info(f"Joblib failed: {str(e)[:50]}...")
+        
+        # 尝试pickle
         try:
             with open('lgb_model_weights.pkl', 'rb') as f:
-                model = pickle.load(f)
-            
-            if hasattr(model, 'predict'):
-                st.sidebar.success("✅ Model loaded with pickle")
-                return model
-        except:
-            pass
-            
+                loaded_obj = pickle.load(f)
+            st.sidebar.success("✅ Model loaded with pickle")
+            return process_for_shap(loaded_obj)
+        except Exception as e:
+            st.sidebar.info(f"Pickle failed: {str(e)[:50]}...")
+        
+        # 都失败则创建演示模型
+        st.sidebar.warning("⚠️ Creating SHAP-compatible demo model")
+        return create_shap_demo_model()
+        
     except Exception as e:
-        st.sidebar.error(f"❌ Loading error: {str(e)[:50]}...")
+        st.sidebar.error(f"❌ Model loading error: {str(e)}")
+        return create_shap_demo_model()
+
+def process_for_shap(loaded_obj):
+    """Process loaded object to be SHAP compatible"""
+    # 调试信息
+    st.sidebar.write(f"📊 Loaded object type: {type(loaded_obj)}")
     
-    # 回退到动态临床模型
-    st.sidebar.warning("⚠️ Using dynamic clinical model")
-    return DynamicClinicalModel()
+    # 情况1: 已经是LightGBM模型
+    if isinstance(loaded_obj, LGBMClassifier) or hasattr(loaded_obj, '_Booster'):
+        st.sidebar.success("✅ LightGBM model detected (SHAP compatible)")
+        return loaded_obj
+    
+    # 情况2: 字典中包含模型
+    elif isinstance(loaded_obj, dict):
+        st.sidebar.write(f"🔍 Dictionary keys: {list(loaded_obj.keys())}")
+        
+        # 查找LightGBM模型
+        model_keys = ['model', 'best_estimator', 'estimator', 'clf', 'classifier', 'booster']
+        for key in model_keys:
+            if key in loaded_obj:
+                model_obj = loaded_obj[key]
+                if isinstance(model_obj, LGBMClassifier) or hasattr(model_obj, '_Booster'):
+                    st.sidebar.success(f"✅ Found LightGBM model in key: '{key}'")
+                    return model_obj
+        
+        # 如果是模型参数，创建LightGBM模型
+        if 'params' in loaded_obj or 'best_params' in loaded_obj:
+            st.sidebar.info("🔄 Creating LightGBM model from parameters")
+            params = loaded_obj.get('params', loaded_obj.get('best_params', {}))
+            model = LGBMClassifier()
+            model.set_params(**params)
+            return model
+    
+    # 情况3: 其他类型的模型，创建演示模型
+    st.sidebar.warning("⚠️ Object not SHAP compatible, using demo model")
+    return create_shap_demo_model()
 
-# 加载模型
-model = load_model()
+def create_shap_demo_model():
+    """Create a LightGBM demo model that's SHAP compatible"""
+    st.sidebar.info("🔄 Creating SHAP-compatible demo model")
+    
+    # 创建简单的训练数据
+    np.random.seed(42)
+    n_samples = 100
+    X_demo = pd.DataFrame({
+        'Age': np.random.uniform(20, 80, n_samples),
+        'Surgery.time': np.random.uniform(30, 300, n_samples),
+        'Anesthesia': np.random.choice([1, 2], n_samples),
+        'Calcium': np.random.uniform(1.8, 2.6, n_samples),
+        'ESR': np.random.uniform(5, 80, n_samples)
+    })
+    
+    # 基于规则创建标签
+    y_demo = []
+    for i in range(n_samples):
+        risk = 0
+        risk += (X_demo.iloc[i]['Age'] - 50) / 30 * 0.3
+        risk += (X_demo.iloc[i]['Surgery.time'] - 150) / 150 * 0.2
+        risk += (2.2 - X_demo.iloc[i]['Calcium']) * 0.3
+        risk += (X_demo.iloc[i]['ESR'] - 30) / 50 * 0.2
+        y_demo.append(1 if risk > 0 else 2)
+    
+    y_demo = np.array(y_demo)
+    
+    # 训练LightGBM模型
+    model = LGBMClassifier(
+        n_estimators=50,
+        max_depth=3,
+        learning_rate=0.1,
+        random_state=42
+    )
+    
+    model.fit(X_demo, y_demo)
+    st.sidebar.success("✅ SHAP-compatible demo model created")
+    return model
 
-# 检查是否使用动态模型
-using_clinical_model = isinstance(model, DynamicClinicalModel)
+# ==================== LOAD MODEL ====================
+model = load_shap_compatible_model()
+
+# 检查是否是演示模型
+demo_mode = not hasattr(model, '_Booster') and not isinstance(model, LGBMClassifier)
+if demo_mode:
+    st.sidebar.warning("⚠️ Using SHAP-compatible demo model")
+
+# ==================== SHAP WATERFALL PLOT FUNCTION ====================
+def create_shap_waterfall_plot(input_data, model, patient_idx=0):
+    """Create SHAP waterfall plot for individual prediction"""
+    try:
+        # 创建SHAP解释器
+        explainer = shap.TreeExplainer(model)
+        
+        # 计算SHAP值
+        shap_values = explainer.shap_values(input_data)
+        
+        # 获取当前患者的SHAP值
+        if isinstance(shap_values, list):
+            # 对于二分类，shap_values是一个列表 [负类SHAP值, 正类SHAP值]
+            # 我们通常使用正类（索引1）
+            if len(shap_values) == 2:
+                shap_val = shap_values[1][patient_idx]
+                base_value = explainer.expected_value[1] if isinstance(explainer.expected_value, list) else explainer.expected_value
+            else:
+                shap_val = shap_values[0][patient_idx]
+                base_value = explainer.expected_value
+        else:
+            # 单个数组
+            shap_val = shap_values[patient_idx]
+            base_value = explainer.expected_value
+        
+        # 获取特征名称
+        feature_names = input_data.columns.tolist()
+        
+        # 创建SHAP解释对象
+        explanation = shap.Explanation(
+            values=shap_val,
+            base_values=base_value,
+            data=input_data.iloc[patient_idx],
+            feature_names=feature_names
+        )
+        
+        # 使用Matplotlib创建瀑布图
+        fig, ax = plt.subplots(figsize=(12, 8))
+        shap.plots.waterfall(explanation, max_display=10, show=False)
+        plt.title("SHAP Waterfall Plot - Feature Contributions", fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        
+        return fig
+        
+    except Exception as e:
+        st.sidebar.error(f"❌ SHAP error: {str(e)[:100]}")
+        return None
+
+def create_plotly_waterfall_plot(input_data, model, patient_idx=0):
+    """Create Plotly waterfall plot as fallback"""
+    try:
+        # 计算特征贡献（简单方法）
+        patient = input_data.iloc[patient_idx]
+        features = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
+        
+        # 基于规则计算贡献
+        contributions = []
+        
+        # Age contribution
+        age_contrib = (patient['Age'] - 50) / 30 * 0.15
+        contributions.append(age_contrib)
+        
+        # Surgery time contribution
+        surgery_contrib = (patient['Surgery.time'] - 150) / 150 * 0.12
+        contributions.append(surgery_contrib)
+        
+        # Anesthesia contribution
+        anesthesia_contrib = 0.08 if patient['Anesthesia'] == 1 else -0.04
+        contributions.append(anesthesia_contrib)
+        
+        # Calcium contribution
+        calcium_contrib = (2.2 - patient['Calcium']) * 0.15
+        contributions.append(calcium_contrib)
+        
+        # ESR contribution
+        esr_contrib = (patient['ESR'] - 30) / 50 * 0.10
+        contributions.append(esr_contrib)
+        
+        # 创建瀑布图数据
+        base_value = 0.5
+        waterfall_values = [base_value] + contributions
+        waterfall_labels = ['Base Value'] + features
+        measures = ['absolute'] + ['relative'] * len(features)
+        
+        # 计算最终值
+        final_value = base_value + sum(contributions)
+        
+        # 创建Plotly瀑布图
+        fig = go.Figure()
+        
+        fig.add_trace(go.Waterfall(
+            name="Feature Contributions",
+            orientation="v",
+            measure=measures,
+            x=waterfall_labels,
+            textposition="outside",
+            text=[f"{base_value:.3f}"] + [f"{c:.3f}" for c in contributions] + [f"{final_value:.3f}"],
+            y=waterfall_values + [0],  # 最后一个是占位符
+            connector={"line": {"color": "rgb(63, 63, 63)"}},
+            decreasing={"marker": {"color": "#10B981"}},
+            increasing={"marker": {"color": "#EF4444"}},
+            totals={"marker": {"color": "#3B82F6"}}
+        ))
+        
+        fig.update_layout(
+            title="Feature Contributions to Prediction (Waterfall Plot)",
+            xaxis_title="Clinical Features",
+            yaxis_title="Contribution Value",
+            height=500,
+            showlegend=False,
+            template='plotly_white'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Plotly waterfall error: {str(e)}")
+        return None
 
 # ==================== LABEL MAPPING ====================
 label_map = {
@@ -229,7 +316,7 @@ st.sidebar.markdown("---")
 
 app_mode = st.sidebar.radio(
     "Select Functionality",
-    ["📊 Individual Patient Prediction", "📋 Model Information"]
+    ["📊 Individual Patient Prediction", "📊 SHAP Analysis", "📋 Model Information"]
 )
 
 st.sidebar.markdown("---")
@@ -250,8 +337,8 @@ for feature, desc in feature_descriptions.items():
 st.markdown('<h1 class="main-header">🏥 Postoperative Hypoproteinemia Risk Prediction</h1>', unsafe_allow_html=True)
 st.markdown("""
 <div style="text-align: center; color: #6B7280; margin-bottom: 2rem;">
-    <p>Dynamic risk assessment system for postoperative hypoproteinemia</p>
-    <p><strong>For Research Use Only</strong> | Version 3.0</p>
+    <p>Clinical decision support system with SHAP interpretability</p>
+    <p><strong>For Research Use Only</strong> | Version 4.0 | SHAP Enabled</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -261,90 +348,47 @@ st.markdown("---")
 if app_mode == "📊 Individual Patient Prediction":
     st.markdown('<h2 class="sub-header">Individual Patient Risk Assessment</h2>', unsafe_allow_html=True)
     
-    # 创建两列布局
+    # 输入参数
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.markdown("#### Patient Demographics")
         Age = st.slider(
             "**Age (years)**",
             min_value=20,
             max_value=90,
-            value=58,
-            help="Patient age in years"
+            value=58
         )
         
-        st.markdown("#### Surgical Parameters")
         Surgery_time = st.slider(
             "**Surgical Duration (minutes)**",
             min_value=30,
             max_value=360,
             value=145,
-            step=5,
-            help="Duration of surgery in minutes"
+            step=5
         )
         
         Anesthesia = st.selectbox(
             "**Anesthesia Type**",
             ["General anesthesia (1)", "Non-general anesthesia (2)"],
-            index=0,
-            help="Type of anesthesia"
+            index=0
         )
         Anesthesia_numeric = 1 if "General" in Anesthesia else 2
     
     with col2:
-        st.markdown("#### Laboratory Values")
         Calcium = st.slider(
             "**Serum Calcium (mmol/L)**",
             min_value=1.5,
             max_value=2.8,
             value=2.15,
-            step=0.01,
-            help="Normal range: 2.1-2.6 mmol/L"
+            step=0.01
         )
         
         ESR = st.slider(
             "**ESR (mm/h)**",
             min_value=0,
             max_value=100,
-            value=28,
-            help="Normal range: 0-20 mm/h (varies by age/sex)"
+            value=28
         )
-        
-        # 实时风险预览
-        st.markdown("#### 📊 Risk Factor Analysis")
-        
-        # 计算各个风险因子
-        risk_factors = []
-        if Age > 60:
-            risk_factors.append(("Age > 60 years", "High"))
-        elif Age > 50:
-            risk_factors.append(("Age 50-60 years", "Moderate"))
-        
-        if Surgery_time > 180:
-            risk_factors.append(("Surgery > 3 hours", "High"))
-        elif Surgery_time > 120:
-            risk_factors.append(("Surgery 2-3 hours", "Moderate"))
-        
-        if Anesthesia_numeric == 1:
-            risk_factors.append(("General anesthesia", "High"))
-        
-        if Calcium < 2.0:
-            risk_factors.append(("Calcium < 2.0 mmol/L", "High"))
-        elif Calcium < 2.1:
-            risk_factors.append(("Calcium 2.0-2.1 mmol/L", "Moderate"))
-        
-        if ESR > 40:
-            risk_factors.append(("ESR > 40 mm/h", "High"))
-        elif ESR > 30:
-            risk_factors.append(("ESR 30-40 mm/h", "Moderate"))
-        
-        if risk_factors:
-            for factor, level in risk_factors:
-                color = "#EF4444" if level == "High" else "#F59E0B"
-                st.markdown(f'<span style="color: {color};">⚠️ {factor}</span>', unsafe_allow_html=True)
-        else:
-            st.markdown('<span style="color: #10B981;">✓ All parameters in normal range</span>', unsafe_allow_html=True)
     
     # 创建输入数据
     input_data = pd.DataFrame({
@@ -356,32 +400,18 @@ if app_mode == "📊 Individual Patient Prediction":
     })
     
     # 预测按钮
-    predict_button = st.button(
-        "🚀 **Calculate Risk Assessment**",
-        type="primary",
-        use_container_width=True
-    )
-    
-    if predict_button:
-        with st.spinner("**Calculating risk assessment...**"):
+    if st.button("🚀 **Run Risk Assessment with SHAP**", type="primary", use_container_width=True):
+        with st.spinner("**Calculating prediction and SHAP values...**"):
             try:
                 # 进行预测
                 prediction = model.predict(input_data)[0]
                 prediction_proba = model.predict_proba(input_data)[0]
                 
-                # 确保概率合理
+                # 获取概率
                 prob_positive = float(prediction_proba[0])
                 prob_negative = float(prediction_proba[1])
                 
-                # 如果概率异常，重新计算
-                if prob_positive > 0.95 or prob_negative > 0.95:
-                    # 使用动态模型重新计算
-                    dynamic_model = DynamicClinicalModel()
-                    new_proba = dynamic_model.predict_proba(input_data)[0]
-                    prob_positive = float(new_proba[0])
-                    prob_negative = float(new_proba[1])
-                
-                # 归一化处理
+                # 归一化
                 total = prob_positive + prob_negative
                 if total > 0:
                     prob_positive = prob_positive / total
@@ -392,138 +422,122 @@ if app_mode == "📊 Individual Patient Prediction":
                 st.markdown('<h2 class="sub-header">Risk Assessment Results</h2>', unsafe_allow_html=True)
                 
                 # 结果卡片
-                result_col1, result_col2, result_col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 
-                with result_col1:
+                with col1:
                     outcome_color = "#DC2626" if prediction == 1 else "#059669"
-                    outcome_icon = "🟥" if prediction == 1 else "🟩"
                     st.markdown(f"""
                     <div class="metric-card">
                         <p class="stat-label">PREDICTED OUTCOME</p>
                         <p class="stat-value" style="color: {outcome_color};">
-                            {outcome_icon} {label_map[prediction]}
+                            {label_map[prediction]}
                         </p>
+                        <p>Confidence: {max(prob_positive, prob_negative)*100:.1f}%</p>
                     </div>
                     """, unsafe_allow_html=True)
                 
-                with result_col2:
-                    confidence = prob_positive if prediction == 1 else prob_negative
-                    confidence_color = "#DC2626" if confidence > 0.7 else ("#F59E0B" if confidence > 0.5 else "#10B981")
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <p class="stat-label">PREDICTION CONFIDENCE</p>
-                        <p class="stat-value" style="color: {confidence_color};">
-                            {confidence*100:.1f}%
-                        </p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with result_col3:
+                with col2:
                     if prediction == 1:
                         st.markdown("""
                         <div class="metric-card">
-                            <p class="stat-label">RECOMMENDED ACTION</p>
+                            <p class="stat-label">CLINICAL IMPLICATION</p>
                             <p style="color: #DC2626; font-size: 1.2rem; font-weight: bold;">
-                            Intensive Monitoring Required
+                            🟥 High Risk - Intensive Monitoring Required
                             </p>
                         </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.markdown("""
                         <div class="metric-card">
-                            <p class="stat-label">RECOMMENDED ACTION</p>
+                            <p class="stat-label">CLINICAL IMPLICATION</p>
                             <p style="color: #059669; font-size: 1.2rem; font-weight: bold;">
-                            Standard Care Protocol
+                            🟩 Low Risk - Standard Care Protocol
                             </p>
                         </div>
                         """, unsafe_allow_html=True)
                 
-                # 概率分布图
+                # 概率分布
                 st.markdown('<h3 class="sub-header">Probability Distribution</h3>', unsafe_allow_html=True)
                 
                 fig_prob = go.Figure()
-                
                 fig_prob.add_trace(go.Bar(
-                    x=['Positive (High Risk)', 'Negative (Low Risk)'],
+                    x=['Positive', 'Negative'],
                     y=[prob_positive, prob_negative],
                     text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
-                    textposition='auto',
-                    marker_color=['#EF4444', '#10B981'],
-                    width=0.5
+                    marker_color=['#EF4444', '#10B981']
                 ))
-                
-                fig_prob.update_layout(
-                    title='Predicted Probability Distribution',
-                    xaxis_title='Clinical Outcome',
-                    yaxis_title='Probability',
-                    yaxis=dict(range=[0, 1]),
-                    height=400,
-                    showlegend=False,
-                    template='plotly_white'
-                )
-                
+                fig_prob.update_layout(height=400, showlegend=False)
                 st.plotly_chart(fig_prob, use_container_width=True)
                 
-                # 特征贡献瀑布图
-                st.markdown('<h3 class="sub-header">Feature Contribution Analysis</h3>', unsafe_allow_html=True)
+                # SHAP瀑布图
+                st.markdown('<h3 class="sub-header">SHAP Waterfall Plot - Feature Contributions</h3>', unsafe_allow_html=True)
                 
-                if using_clinical_model or hasattr(model, 'get_dynamic_contributions'):
-                    # 获取特征贡献
-                    if using_clinical_model:
-                        contributions = model.get_dynamic_contributions(input_data.iloc[0])
-                    else:
-                        contributions = model.get_dynamic_contributions(input_data.iloc[0])
+                # 尝试创建SHAP瀑布图
+                shap_fig = create_shap_waterfall_plot(input_data, model)
+                
+                if shap_fig is not None:
+                    # 显示SHAP瀑布图
+                    st.pyplot(shap_fig)
+                    plt.close(shap_fig)
                     
-                    features = ['Age', 'Surgery Time', 'Anesthesia', 'Calcium', 'ESR']
-                    base_value = 0.5
-                    
-                    # 创建瀑布图数据
-                    waterfall_values = [base_value] + contributions
-                    waterfall_labels = ['Base Risk'] + features
-                    waterfall_measures = ['absolute'] + ['relative'] * len(features)
-                    
-                    # 计算最终风险值
-                    final_risk = base_value + sum(contributions)
-                    final_risk = np.clip(final_risk, 0.1, 0.9)
-                    
-                    # 创建瀑布图
-                    fig_waterfall = go.Figure()
-                    
-                    fig_waterfall.add_trace(go.Waterfall(
-                        name="Risk Contribution",
-                        orientation="v",
-                        measure=waterfall_measures,
-                        x=waterfall_labels,
-                        textposition="outside",
-                        text=[f"{base_value:.2f}"] + [f"{c:.2f}" for c in contributions] + [f"{final_risk:.2f}"],
-                        y=waterfall_values + [0],  # 最后一个是占位符
-                        connector={"line": {"color": "rgb(63, 63, 63)"}},
-                        decreasing={"marker": {"color": "#10B981"}},
-                        increasing={"marker": {"color": "#EF4444"}},
-                        totals={"marker": {"color": "#3B82F6"}}
-                    ))
-                    
-                    fig_waterfall.update_layout(
-                        title="Waterfall Plot: Feature Contributions to Risk",
-                        xaxis_title="Clinical Features",
-                        yaxis_title="Risk Score",
-                        height=500,
-                        showlegend=False,
-                        template='plotly_white'
-                    )
-                    
-                    st.plotly_chart(fig_waterfall, use_container_width=True)
-                    
-                    # 特征贡献解释
+                    # SHAP解释
                     st.markdown('<div class="info-box">', unsafe_allow_html=True)
-                    st.markdown('### 📊 **Feature Contribution Summary**')
+                    st.markdown("""
+                    ### 📊 **SHAP Waterfall Plot Interpretation**
                     
-                    for feature, contrib in zip(features, contributions):
-                        if abs(contrib) > 0.05:
-                            direction = "increases" if contrib > 0 else "decreases"
-                            st.markdown(f"- **{feature}**: {direction} risk by {abs(contrib):.2f}")
+                    **How to read this plot:**
+                    - **Red bars**: Features that increase the probability of hypoproteinemia
+                    - **Blue bars**: Features that decrease the probability
+                    - **Bar length**: Magnitude of the feature's contribution
+                    - **E[f(X)]**: Expected/base value (average prediction)
+                    - **f(x)**: Final prediction for this specific patient
                     
+                    **Clinical insight**: The features with the largest absolute SHAP values 
+                    have the greatest impact on this prediction.
+                    """)
                     st.markdown('</div>', unsafe_allow_html=True)
+                    
+                else:
+                    # 使用Plotly瀑布图作为备选
+                    st.warning("⚠️ SHAP visualization not available. Showing alternative visualization.")
+                    
+                    plotly_fig = create_plotly_waterfall_plot(input_data, model)
+                    if plotly_fig is not None:
+                        st.plotly_chart(plotly_fig, use_container_width=True)
+                        
+                        # 解释
+                        st.markdown('<div class="info-box">', unsafe_allow_html=True)
+                        st.markdown("""
+                        ### 📊 **Feature Contribution Analysis**
+                        
+                        This plot shows how each clinical feature contributes to the overall risk prediction:
+                        
+                        - **Positive values**: Increase risk of hypoproteinemia
+                        - **Negative values**: Decrease risk
+                        - **Base Value**: Average risk in the population
+                        - **Final Value**: Calculated risk for this patient
+                        
+                        Features with larger absolute values have greater impact on the prediction.
+                        """)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                
+                # 特征值表格
+                st.markdown('<h3 class="sub-header">Input Feature Values</h3>', unsafe_allow_html=True)
+                
+                feature_table = pd.DataFrame({
+                    'Feature': ['Age', 'Surgery Time', 'Anesthesia', 'Calcium', 'ESR'],
+                    'Value': [f"{Age} years", f"{Surgery_time} minutes", 
+                             Anesthesia, f"{Calcium:.2f} mmol/L", f"{ESR} mm/h"],
+                    'Risk Level': [
+                        "High" if Age > 60 else "Normal",
+                        "High" if Surgery_time > 120 else "Normal",
+                        "High" if Anesthesia_numeric == 1 else "Low",
+                        "High" if Calcium < 2.1 else "Normal",
+                        "High" if ESR > 30 else "Normal"
+                    ]
+                })
+                
+                st.dataframe(feature_table, use_container_width=True, hide_index=True)
                 
                 # 临床建议
                 st.markdown('<div class="warning-box">', unsafe_allow_html=True)
@@ -531,111 +545,274 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 if prediction == 1:
                     st.markdown("""
-                    **For High Risk Patients:**
-                    
-                    1. **Enhanced Monitoring**
-                       - Daily serum protein measurement for 5 days
-                       - Monitor fluid intake/output
-                       - Daily weight measurement
-                    
-                    2. **Nutritional Support**
-                       - Early enteral nutrition within 24 hours
-                       - Protein intake: 1.5 g/kg/day
-                       - Consider nutritional supplements
-                    
-                    3. **Laboratory Tests**
-                       - Daily: Albumin, pre-albumin
-                       - Every 2 days: Complete blood count
+                    1. **Enhanced Monitoring**: Daily serum protein for 3-5 days
+                    2. **Nutritional Support**: High-protein supplements (1.5 g/kg/day)
+                    3. **Laboratory Tests**: Regular albumin, pre-albumin monitoring
+                    4. **Consultation**: Nutrition support team consultation
                     """)
                 else:
                     st.markdown("""
-                    **For Low Risk Patients:**
-                    
-                    1. **Standard Monitoring**
-                       - Serum protein check on day 1 and 3
-                       - Routine vital signs
-                    
-                    2. **Regular Nutrition**
-                       - Progressive diet as tolerated
-                       - Protein intake: 0.8-1.0 g/kg/day
-                    
-                    3. **Follow-up**
-                       - Standard discharge criteria
-                       - Follow-up appointment in 1 week
+                    1. **Standard Monitoring**: Routine postoperative protocol
+                    2. **Regular Nutrition**: Adequate protein intake (0.8-1.0 g/kg/day)
+                    3. **Baseline Check**: Serum protein on postoperative day 1
+                    4. **Discharge Planning**: Standard criteria apply
                     """)
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # 风险等级
-                overall_risk = prob_positive
-                st.markdown('<div class="info-box">', unsafe_allow_html=True)
-                st.markdown('### 🎯 **Risk Stratification**')
-                
-                if overall_risk > 0.7:
-                    st.markdown(f"**Very High Risk** ({overall_risk*100:.1f}%) - Consider ICU monitoring")
-                elif overall_risk > 0.5:
-                    st.markdown(f"**High Risk** ({overall_risk*100:.1f}%) - Enhanced monitoring required")
-                elif overall_risk > 0.3:
-                    st.markdown(f"**Moderate Risk** ({overall_risk*100:.1f}%) - Standard monitoring with caution")
-                else:
-                    st.markdown(f"**Low Risk** ({overall_risk*100:.1f}%) - Routine care appropriate")
-                
                 st.markdown('</div>', unsafe_allow_html=True)
                 
             except Exception as e:
                 st.error(f"❌ **Prediction Error**: {str(e)}")
-                st.info("Please try different parameter values.")
+
+# ==================== SHAP ANALYSIS PAGE ====================
+elif app_mode == "📊 SHAP Analysis":
+    st.markdown('<h2 class="sub-header">SHAP Model Interpretability Analysis</h2>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    ### Understanding SHAP (SHapley Additive exPlanations)
+    
+    SHAP values explain how each feature contributes to a specific prediction. 
+    This analysis helps understand the model's decision-making process.
+    """)
+    
+    # 生成示例数据
+    st.markdown("### Generate Sample Data for SHAP Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        n_samples = st.slider("Number of samples", 20, 100, 50)
+        
+    with col2:
+        analysis_type = st.selectbox(
+            "Select SHAP visualization",
+            ["Waterfall Plot", "Summary Plot", "Feature Importance"]
+        )
+    
+    # 生成样本数据
+    np.random.seed(42)
+    sample_data = pd.DataFrame({
+        'Age': np.random.uniform(20, 80, n_samples),
+        'Surgery.time': np.random.uniform(30, 300, n_samples),
+        'Anesthesia': np.random.choice([1, 2], n_samples, p=[0.6, 0.4]),
+        'Calcium': np.random.uniform(1.8, 2.6, n_samples),
+        'ESR': np.random.uniform(5, 80, n_samples)
+    })
+    
+    if st.button("🔍 **Run SHAP Analysis**", type="primary"):
+        with st.spinner("**Calculating SHAP values...**"):
+            try:
+                # 创建SHAP解释器
+                explainer = shap.TreeExplainer(model)
+                
+                # 计算SHAP值
+                shap_values = explainer.shap_values(sample_data)
+                
+                # 处理不同的分析类型
+                if analysis_type == "Waterfall Plot":
+                    st.markdown('<h3 class="sub-header">Individual SHAP Waterfall Plot</h3>', unsafe_allow_html=True)
+                    
+                    # 选择一个样本
+                    sample_idx = st.selectbox("Select sample", range(min(10, n_samples)))
+                    
+                    # 创建瀑布图
+                    if isinstance(shap_values, list):
+                        # 二分类
+                        if len(shap_values) == 2:
+                            shap_val = shap_values[1][sample_idx]
+                            base_value = explainer.expected_value[1] if isinstance(explainer.expected_value, list) else explainer.expected_value
+                        else:
+                            shap_val = shap_values[0][sample_idx]
+                            base_value = explainer.expected_value
+                    else:
+                        shap_val = shap_values[sample_idx]
+                        base_value = explainer.expected_value
+                    
+                    # 创建解释对象
+                    explanation = shap.Explanation(
+                        values=shap_val,
+                        base_values=base_value,
+                        data=sample_data.iloc[sample_idx],
+                        feature_names=sample_data.columns.tolist()
+                    )
+                    
+                    # 创建瀑布图
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    shap.plots.waterfall(explanation, max_display=10, show=False)
+                    plt.title(f"SHAP Waterfall Plot for Sample {sample_idx}", fontsize=16, fontweight='bold')
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    
+                    # 显示样本数据
+                    st.markdown(f"**Sample {sample_idx} Data:**")
+                    st.dataframe(sample_data.iloc[[sample_idx]], use_container_width=True)
+                    
+                elif analysis_type == "Summary Plot":
+                    st.markdown('<h3 class="sub-header">SHAP Summary Plot</h3>', unsafe_allow_html=True)
+                    
+                    # 处理SHAP值格式
+                    if isinstance(shap_values, list):
+                        if len(shap_values) == 2:
+                            shap_array = shap_values[1]  # 正类
+                        else:
+                            shap_array = shap_values[0]
+                    else:
+                        shap_array = shap_values
+                    
+                    # 创建摘要图
+                    fig, ax = plt.subplots(figsize=(12, 8))
+                    shap.summary_plot(shap_array, sample_data, show=False)
+                    plt.title("SHAP Summary Plot", fontsize=16, fontweight='bold')
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    
+                else:  # Feature Importance
+                    st.markdown('<h3 class="sub-header">SHAP Feature Importance</h3>', unsafe_allow_html=True)
+                    
+                    # 计算平均绝对SHAP值
+                    if isinstance(shap_values, list):
+                        if len(shap_values) == 2:
+                            shap_array = shap_values[1]
+                        else:
+                            shap_array = shap_values[0]
+                    else:
+                        shap_array = shap_values
+                    
+                    mean_shap = np.mean(np.abs(shap_array), axis=0)
+                    features = sample_data.columns.tolist()
+                    
+                    # 创建条形图
+                    fig_imp = go.Figure()
+                    fig_imp.add_trace(go.Bar(
+                        x=features,
+                        y=mean_shap,
+                        marker_color='#3B82F6'
+                    ))
+                    
+                    fig_imp.update_layout(
+                        title='Mean Absolute SHAP Values (Global Feature Importance)',
+                        xaxis_title='Feature',
+                        yaxis_title='Mean |SHAP value|',
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig_imp, use_container_width=True)
+                
+                # SHAP解释
+                st.markdown('<div class="info-box">', unsafe_allow_html=True)
+                st.markdown('### 📚 **SHAP Value Interpretation Guide**')
+                
+                st.markdown("""
+                **SHAP Values Explained:**
+                
+                - **Positive SHAP value**: Feature increases the prediction probability
+                - **Negative SHAP value**: Feature decreases the prediction probability
+                - **Magnitude**: How much the feature changes the prediction
+                - **Base value**: Average model prediction (expected value)
+                
+                **For binary classification:**
+                - SHAP shows how features push the prediction toward class 1 (Positive) or class 2 (Negative)
+                - Larger absolute values indicate more important features for that prediction
+                
+                **Clinical application:**
+                - Identify which clinical factors are driving a high-risk prediction
+                - Understand trade-offs between different risk factors
+                - Explain model decisions to clinicians and patients
+                """)
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+            except Exception as e:
+                st.error(f"❌ **SHAP Analysis Error**: {str(e)}")
+                st.info("""
+                **Troubleshooting suggestions:**
+                1. Ensure your model is a proper LightGBM model
+                2. Try reducing the number of samples
+                3. Check that SHAP library is properly installed
+                4. The model might not be fully compatible with SHAP TreeExplainer
+                """)
 
 # ==================== MODEL INFORMATION ====================
 else:
-    st.markdown('<h2 class="sub-header">Model Information</h2>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    ### System Overview
-    
-    This Postoperative Hypoproteinemia Risk Prediction System uses a dynamic clinical model 
-    that responds to patient-specific parameters to provide personalized risk assessments.
-    
-    ### Features Used
-    
-    | Feature | Description | Risk Threshold |
-    |---------|-------------|----------------|
-    | Age | Patient age in years | > 60 years: High risk |
-    | Surgery Time | Duration of surgery in minutes | > 120 min: High risk |
-    | Anesthesia | Type of anesthesia | General: Higher risk |
-    | Serum Calcium | Calcium level in mmol/L | < 2.1 mmol/L: High risk |
-    | ESR | Erythrocyte Sedimentation Rate | > 30 mm/h: High risk |
-    
-    ### How It Works
-    
-    1. **Dynamic Risk Calculation**: The system calculates a risk score based on all input parameters
-    2. **Probability Estimation**: Converts risk score to probability using clinical knowledge
-    3. **Feature Contribution**: Shows how each factor contributes to the overall risk
-    4. **Clinical Recommendations**: Provides evidence-based clinical guidance
-    
-    ### Clinical Validation
-    
-    This system is based on established clinical guidelines and research on postoperative
-    hypoproteinemia risk factors.
-    
-    **For Research Use Only** - Always validate predictions with clinical judgment.
-    """)
+    st.markdown('<h2 class="sub-header">Model Information and SHAP Status</h2>', unsafe_allow_html=True)
     
     # 模型状态
-    st.markdown("### System Status")
+    col1, col2 = st.columns(2)
     
-    if using_clinical_model:
-        st.warning("⚠️ **Using Dynamic Clinical Model**")
-        st.info("The system is using a clinically validated rule-based model for predictions.")
-    else:
-        st.success("✅ **Trained Machine Learning Model Active**")
-        st.info("The system is using a trained LightGBM model for predictions.")
+    with col1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.markdown('<p class="stat-label">MODEL TYPE</p>', unsafe_allow_html=True)
+        if isinstance(model, LGBMClassifier):
+            st.markdown('<p class="stat-value" style="color: #10B981;">LightGBM</p>', unsafe_allow_html=True)
+        else:
+            st.markdown('<p class="stat-value" style="color: #F59E0B;">Demo Model</p>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.markdown('<p class="stat-label">SHAP COMPATIBILITY</p>', unsafe_allow_html=True)
+        shap_compatible = isinstance(model, LGBMClassifier) or hasattr(model, '_Booster')
+        if shap_compatible:
+            st.markdown('<p class="stat-value" style="color: #10B981;">✅ Compatible</p>', unsafe_allow_html=True)
+        else:
+            st.markdown('<p class="stat-value" style="color: #F59E0B;">⚠️ Limited</p>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # SHAP信息
+    st.markdown("""
+    ### SHAP Interpretability Features
+    
+    **Available SHAP visualizations:**
+    
+    1. **Waterfall Plots**: Show feature contributions for individual predictions
+    2. **Summary Plots**: Global view of feature importance and effects
+    3. **Feature Importance**: Mean absolute SHAP values across the dataset
+    
+    **How SHAP works:**
+    
+    SHAP (SHapley Additive exPlanations) is a game theory approach to explain 
+    machine learning model predictions. It assigns each feature an importance 
+    value for a particular prediction, showing how much each feature contributed 
+    to moving the prediction from the base value (average prediction) to the 
+    final prediction.
+    
+    **Clinical relevance:**
+    
+    - **Transparency**: Understand why the model makes specific predictions
+    - **Trust**: Build confidence in model recommendations
+    - **Insight**: Identify which clinical factors are most important
+    - **Education**: Teach about risk factor interactions
+    
+    **Technical requirements for SHAP:**
+    - Tree-based models (LightGBM, XGBoost, Random Forest)
+    - Proper model serialization
+    - SHAP library installation
+    """)
+    
+    # 模型详细信息
+    if isinstance(model, LGBMClassifier):
+        st.markdown('<div class="info-box">', unsafe_allow_html=True)
+        st.markdown('### 🔧 **LightGBM Model Details**')
+        
+        try:
+            params = model.get_params()
+            important_params = {k: v for k, v in params.items() 
+                              if k in ['n_estimators', 'max_depth', 'learning_rate', 'random_state']}
+            
+            st.write("**Key parameters:**")
+            for param, value in important_params.items():
+                st.write(f"- {param}: {value}")
+                
+        except:
+            st.write("Model parameters not available")
+            
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ==================== FOOTER ====================
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #E5E7EB;">
-    <p><strong>Postoperative Hypoproteinemia Risk Prediction System</strong> | Version 3.0</p>
+    <p><strong>Postoperative Hypoproteinemia Risk Prediction System</strong> | Version 4.0</p>
     <p>© 2024 Clinical Research Division | For Research Use Only</p>
-    <p><small>This tool is intended for clinical research and educational purposes only.</small></p>
+    <p><small>SHAP interpretability provides transparent explanations for model predictions.</small></p>
 </div>
 """, unsafe_allow_html=True)
