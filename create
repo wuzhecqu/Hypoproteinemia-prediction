@@ -261,53 +261,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("---")
-def create_shap_waterfall_plot(input_data, model, patient_idx=0):
-    """Create SHAP waterfall plot for individual prediction"""
-    try:
-        # 创建SHAP解释器
-        explainer = shap.TreeExplainer(model)
 
-        # 计算SHAP值
-        shap_values = explainer.shap_values(input_data)
-
-        # 获取当前患者的SHAP值
-        if isinstance(shap_values, list):
-            # 对于二分类，shap_values是一个列表 [负类SHAP值, 正类SHAP值]
-            # 我们通常使用正类（索引1）
-            if len(shap_values) == 2:
-                shap_val = shap_values[1][patient_idx]
-                base_value = explainer.expected_value[1] if isinstance(explainer.expected_value,
-                                                                       list) else explainer.expected_value
-            else:
-                shap_val = shap_values[0][patient_idx]
-                base_value = explainer.expected_value
-        else:
-            # 单个数组
-            shap_val = shap_values[patient_idx]
-            base_value = explainer.expected_value
-
-        # 获取特征名称
-        feature_names = input_data.columns.tolist()
-
-        # 创建SHAP解释对象
-        explanation = shap.Explanation(
-            values=shap_val,
-            base_values=base_value,
-            data=input_data.iloc[patient_idx],
-            feature_names=feature_names
-        )
-
-        # 使用Matplotlib创建瀑布图
-        fig, ax = plt.subplots(figsize=(12, 8))
-        shap.plots.waterfall(explanation, max_display=10, show=False)
-        plt.title("SHAP Waterfall Plot - Feature Contributions", fontsize=16, fontweight='bold')
-        plt.tight_layout()
-
-        return fig
-
-    except Exception as e:
-        st.sidebar.error(f"❌ SHAP error: {str(e)[:100]}")
-        return None
 
 def create_plotly_waterfall_plot(input_data, model, patient_idx=0):
     """Create Plotly waterfall plot as fallback"""
@@ -381,7 +335,53 @@ def create_plotly_waterfall_plot(input_data, model, patient_idx=0):
         return None
 
 
+def create_shap_waterfall_plot(input_data, model, patient_idx=0):
+    """Create SHAP waterfall plot for individual prediction"""
+    try:
+        # 创建SHAP解释器
+        explainer = shap.TreeExplainer(model)
 
+        # 计算SHAP值
+        shap_values = explainer.shap_values(input_data)
+
+        # 获取当前患者的SHAP值
+        if isinstance(shap_values, list):
+            # 对于二分类，shap_values是一个列表 [负类SHAP值, 正类SHAP值]
+            # 我们通常使用正类（索引1）
+            if len(shap_values) == 2:
+                shap_val = shap_values[1][patient_idx]
+                base_value = explainer.expected_value[1] if isinstance(explainer.expected_value,
+                                                                       list) else explainer.expected_value
+            else:
+                shap_val = shap_values[0][patient_idx]
+                base_value = explainer.expected_value
+        else:
+            # 单个数组
+            shap_val = shap_values[patient_idx]
+            base_value = explainer.expected_value
+
+        # 获取特征名称
+        feature_names = input_data.columns.tolist()
+
+        # 创建SHAP解释对象
+        explanation = shap.Explanation(
+            values=shap_val,
+            base_values=base_value,
+            data=input_data.iloc[patient_idx],
+            feature_names=feature_names
+        )
+
+        # 使用Matplotlib创建瀑布图
+        fig, ax = plt.subplots(figsize=(12, 8))
+        shap.plots.waterfall(explanation, max_display=10, show=False)
+        plt.title("SHAP Waterfall Plot - Feature Contributions", fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        return fig
+
+    except Exception as e:
+        st.sidebar.error(f"❌ SHAP error: {str(e)[:100]}")
+        return None
 # ==================== INDIVIDUAL PATIENT PREDICTION ====================
 if app_mode == "📊 Individual Patient Prediction":
     st.markdown('<h2 class="sub-header">Individual Patient Risk Assessment</h2>', unsafe_allow_html=True)
@@ -757,4 +757,5 @@ st.markdown("""
     <p><small>This tool is intended for clinical research and educational purposes only.</small></p>
 </div>
 """, unsafe_allow_html=True)
+
 
