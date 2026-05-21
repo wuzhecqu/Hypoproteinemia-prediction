@@ -471,8 +471,8 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 fig_prob = go.Figure()
                 fig_prob.add_trace(go.Bar(
-                    x=['Positive Risk', 'Negative Risk'],
-                    y=[prob_positive, prob_negative],
+                    x=['Negative Risk', 'Positive Risk'],
+                    y=[prob_negative, prob_positive],
                     text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
                     textposition='auto',
                     marker_color=['#EF4444', '#10B981'],
