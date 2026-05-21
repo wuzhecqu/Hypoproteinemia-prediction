@@ -76,7 +76,7 @@ st.markdown("""
 class DynamicProbabilityModel:
     """Model for accurate probability prediction using clinical rules"""
     def __init__(self):
-        self.classes_ = np.array([1, 2])  # 1: Positive, 2: Negative
+        self.classes_ = np.array([0, 1])  # 0: Negative, 1: Positive (标准顺序)
         self.feature_importances_ = np.array([0.30, 0.25, 0.15, 0.20, 0.10])
         self.feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
         
@@ -85,7 +85,8 @@ class DynamicProbabilityModel:
         predictions = []
         for i in range(len(X)):
             risk_score = self._calculate_dynamic_risk_score(X.iloc[i])
-            predictions.append(1 if risk_score > 0.5 else 2)
+            # 风险分数 > 0.5 预测为阳性(1)，否则为阴性(0)
+            predictions.append(1 if risk_score > 0.5 else 0)
         return np.array(predictions)
     
     def predict_proba(self, X):
@@ -112,7 +113,9 @@ class DynamicProbabilityModel:
                 prob_positive = prob_positive / total
                 prob_negative = prob_negative / total
 
-            probabilities.append([prob_positive, prob_negative])
+            # 返回 [阴性概率, 阳性概率] 或 [阳性概率, 阴性概率]? 
+            # 标准格式: [class_0_prob, class_1_prob] 其中 class_0=阴性, class_1=阳性
+            probabilities.append([prob_negative, prob_positive])
 
         return np.array(probabilities)
     
@@ -151,7 +154,7 @@ class ShapCompatibleModel:
     def __init__(self):
         # 创建一个与临床规则一致的LightGBM模型
         self.lgb_model = self._create_trained_lightgbm()
-        self.classes_ = np.array([1, 2])
+        self.classes_ = np.array([0, 1])  # 0: Negative, 1: Positive
         self.feature_importances_ = self.lgb_model.feature_importances_
         
     def _create_trained_lightgbm(self):
@@ -169,6 +172,7 @@ class ShapCompatibleModel:
         })
         
         # 基于临床规则创建标签（与DynamicProbabilityModel保持一致）
+        # 1: Positive (高风险), 0: Negative (低风险)
         y_train = []
         for i in range(n_samples):
             risk = 0
@@ -186,7 +190,7 @@ class ShapCompatibleModel:
             # 添加一些噪声
             risk += np.random.normal(0, 0.05)
             
-            y_train.append(1 if risk > 0.5 else 2)
+            y_train.append(1 if risk > 0.5 else 0)  # 1: Positive, 0: Negative
         
         # 训练LightGBM模型
         model = LGBMClassifier(
@@ -274,9 +278,10 @@ def load_models():
 prob_model, shap_model = load_models()
 
 # ==================== LABEL MAPPING ====================
+# 修正：0 = 阴性(低风险)，1 = 阳性(高风险)
 label_map = {
-    1: "Hypoproteinemia Positive (High Risk)",
-    2: "Hypoproteinemia Negative (Low Risk)"
+    1: "⚠️ Hypoproteinemia Positive (High Risk)",
+    0: "✅ Hypoproteinemia Negative (Low Risk)"
 }
 
 # ==================== SIDEBAR ====================
@@ -406,8 +411,9 @@ if app_mode == "📊 Individual Patient Prediction":
                 prediction_proba = prob_model.predict_proba(input_data)[0]
                 
                 # 获取概率
-                prob_positive = float(prediction_proba[0])
-                prob_negative = float(prediction_proba[1])
+                # prediction_proba 格式: [阴性概率, 阳性概率]
+                prob_negative = float(prediction_proba[0])
+                prob_positive = float(prediction_proba[1])
                 
                 # 归一化处理
                 total = prob_positive + prob_negative
@@ -424,7 +430,7 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 with col1:
                     outcome_color = "#DC2626" if prediction == 1 else "#059669"
-                    outcome_icon = "🟥" if prediction == 1 else "🟩"
+                    outcome_icon = "⚠️" if prediction == 1 else "✅"
                     st.markdown(f"""
                     <div class="metric-card">
                         <p class="stat-label">PREDICTED OUTCOME</p>
@@ -471,8 +477,8 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 fig_prob = go.Figure()
                 fig_prob.add_trace(go.Bar(
-                    x=['Negative Risk', 'Positive Risk'],
-                    y=[prob_negative, prob_positive],
+                    x=['High Risk (Positive)', 'Low Risk (Negative)'],
+                    y=[prob_positive, prob_negative],
                     text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
                     textposition='auto',
                     marker_color=['#EF4444', '#10B981'],
