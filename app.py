@@ -76,7 +76,7 @@ st.markdown("""
 class DynamicProbabilityModel:
     """Model for accurate probability prediction using clinical rules"""
     def __init__(self):
-        self.classes_ = np.array([1, 2])  # 1: Negative (Low Risk), 2: Positive (High Risk)
+        self.classes_ = np.array([1, 2])  # 1: Positive (High Risk), 2: Negative (Low Risk)
         self.feature_importances_ = np.array([0.30, 0.25, 0.15, 0.20, 0.10])
         self.feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
         
@@ -85,8 +85,8 @@ class DynamicProbabilityModel:
         predictions = []
         for i in range(len(X)):
             risk_score = self._calculate_dynamic_risk_score(X.iloc[i])
-            # risk_score > 0.5 表示高风险 -> 返回 2 (Positive)
-            predictions.append(2 if risk_score > 0.5 else 1)
+            # risk_score > 0.5 表示高风险 -> 返回 1 (Positive)
+            predictions.append(1 if risk_score > 0.5 else 2)
         return np.array(predictions)
     
     def predict_proba(self, X):
@@ -113,8 +113,8 @@ class DynamicProbabilityModel:
                 prob_positive = prob_positive / total
                 prob_negative = prob_negative / total
 
-            # [阴性概率, 阳性概率]
-            probabilities.append([prob_negative, prob_positive])
+            # [阳性概率, 阴性概率]
+            probabilities.append([prob_positive, prob_negative])
 
         return np.array(probabilities)
     
@@ -153,7 +153,7 @@ class ShapCompatibleModel:
     def __init__(self):
         # 创建一个与临床规则一致的LightGBM模型
         self.lgb_model = self._create_trained_lightgbm()
-        self.classes_ = np.array([1, 2])  # 1: Negative, 2: Positive
+        self.classes_ = np.array([1, 2])  # 1: Positive, 2: Negative
         self.feature_importances_ = self.lgb_model.feature_importances_
         
     def _create_trained_lightgbm(self):
@@ -188,8 +188,8 @@ class ShapCompatibleModel:
             # 添加一些噪声
             risk += np.random.normal(0, 0.05)
             
-            # risk > 0.5 表示高风险 -> 类别 2
-            y_train.append(2 if risk > 0.5 else 1)
+            # risk > 0.5 表示高风险 -> 类别 1
+            y_train.append(1 if risk > 0.5 else 2)
         
         # 训练LightGBM模型
         model = LGBMClassifier(
@@ -222,10 +222,10 @@ def create_shap_waterfall_plot(input_data, shap_model, patient_idx=0):
         # 获取当前患者的SHAP值
         if isinstance(shap_values, list):
             # 对于二分类，shap_values是一个列表 [负类SHAP值, 正类SHAP值]
-            # 我们通常使用正类（索引1）
+            # 我们通常使用正类（索引0）
             if len(shap_values) == 2:
-                shap_val = shap_values[1][patient_idx]
-                base_value = explainer.expected_value[1] if isinstance(explainer.expected_value,
+                shap_val = shap_values[0][patient_idx]
+                base_value = explainer.expected_value[0] if isinstance(explainer.expected_value,
                                                                        list) else explainer.expected_value
             else:
                 shap_val = shap_values[0][patient_idx]
@@ -278,8 +278,8 @@ prob_model, shap_model = load_models()
 
 # ==================== LABEL MAPPING ====================
 label_map = {
-    1: "Hypoproteinemia Negative (Low Risk)",
-    2: "Hypoproteinemia Positive (High Risk)"
+    1: "Hypoproteinemia Positive (High Risk)",
+    2: "Hypoproteinemia Negative (Low Risk)"
 }
 
 # ==================== SIDEBAR ====================
@@ -408,15 +408,15 @@ if app_mode == "📊 Individual Patient Prediction":
                 prediction = prob_model.predict(input_data)[0]
                 prediction_proba = prob_model.predict_proba(input_data)[0]
                 
-                # 获取概率 - 现在 [0] 是阴性概率, [1] 是阳性概率
-                prob_negative = float(prediction_proba[0])
-                prob_positive = float(prediction_proba[1])
+                # 获取概率 - 现在 [0] 是阳性概率, [1] 是阴性概率
+                prob_positive = float(prediction_proba[0])
+                prob_negative = float(prediction_proba[1])
                 
                 # 归一化处理
                 total = prob_positive + prob_negative
                 if total > 0:
-                    prob_negative = prob_negative / total
                     prob_positive = prob_positive / total
+                    prob_negative = prob_negative / total
                 
                 # 显示结果
                 st.markdown("---")
@@ -426,9 +426,9 @@ if app_mode == "📊 Individual Patient Prediction":
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    # prediction == 2 表示高风险 (Positive)
-                    outcome_color = "#DC2626" if prediction == 2 else "#059669"
-                    outcome_icon = "🟥" if prediction == 2 else "🟩"
+                    # prediction == 1 表示高风险 (Positive)
+                    outcome_color = "#DC2626" if prediction == 1 else "#059669"
+                    outcome_icon = "🟥" if prediction == 1 else "🟩"
                     st.markdown(f"""
                     <div class="metric-card">
                         <p class="stat-label">PREDICTED OUTCOME</p>
@@ -439,7 +439,7 @@ if app_mode == "📊 Individual Patient Prediction":
                     """, unsafe_allow_html=True)
                 
                 with col2:
-                    confidence = prob_positive if prediction == 2 else prob_negative
+                    confidence = prob_positive if prediction == 1 else prob_negative
                     confidence_color = "#DC2626" if confidence > 0.8 else ("#F59E0B" if confidence > 0.6 else "#10B981")
                     st.markdown(f"""
                     <div class="metric-card">
@@ -451,7 +451,7 @@ if app_mode == "📊 Individual Patient Prediction":
                     """, unsafe_allow_html=True)
                 
                 with col3:
-                    if prediction == 2:  # 高风险
+                    if prediction == 1:  # 高风险
                         st.markdown("""
                         <div class="metric-card">
                             <p class="stat-label">CLINICAL ACTION</p>
@@ -475,11 +475,11 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 fig_prob = go.Figure()
                 fig_prob.add_trace(go.Bar(
-                    x=['Negative Risk (Low Risk)', 'Positive Risk (High Risk)'],
-                    y=[prob_negative, prob_positive],
-                    text=[f'{prob_negative*100:.1f}%', f'{prob_positive*100:.1f}%'],
+                    x=['Positive Risk (High Risk)', 'Negative Risk (Low Risk)'],
+                    y=[prob_positive, prob_negative],
+                    text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
                     textposition='auto',
-                    marker_color=['#10B981', '#EF4444'],
+                    marker_color=['#EF4444', '#10B981'],
                     width=0.5
                 ))
                 
@@ -570,7 +570,7 @@ if app_mode == "📊 Individual Patient Prediction":
                 st.markdown('<div class="warning-box">', unsafe_allow_html=True)
                 st.markdown('### 📋 **Clinical Recommendations**')
                 
-                if prediction == 2:  # 高风险
+                if prediction == 1:  # 高风险
                     st.markdown("""
                     **Based on high risk prediction:**
                     
@@ -700,7 +700,7 @@ elif app_mode == "📊 SHAP Analysis":
                         # 处理SHAP值格式
                         if isinstance(shap_values, list):
                             if len(shap_values) == 2:
-                                shap_array = shap_values[1]
+                                shap_array = shap_values[0]
                             else:
                                 shap_array = shap_values[0]
                         else:
@@ -728,7 +728,7 @@ elif app_mode == "📊 SHAP Analysis":
                         # 计算平均绝对SHAP值
                         if isinstance(shap_values, list):
                             if len(shap_values) == 2:
-                                shap_array = shap_values[1]
+                                shap_array = shap_values[0]
                             else:
                                 shap_array = shap_values[0]
                         else:
