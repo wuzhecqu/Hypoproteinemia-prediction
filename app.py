@@ -76,16 +76,16 @@ st.markdown("""
 class DynamicProbabilityModel:
     """Model for accurate probability prediction using clinical rules"""
     def __init__(self):
-        self.classes_ = np.array([0, 1])  # 0: Negative, 1: Positive (标准顺序)
+        self.classes_ = np.array([0, 1])  # 0: Negative/Low Risk, 1: Positive/High Risk
         self.feature_importances_ = np.array([0.30, 0.25, 0.15, 0.20, 0.10])
         self.feature_names = ['Age', 'Surgery.time', 'Anesthesia', 'Calcium', 'ESR']
         
     def predict(self, X):
-        """Predict based on dynamic clinical rules"""
+        """Predict based on dynamic clinical rules - returns 0 (low risk) or 1 (high risk)"""
         predictions = []
         for i in range(len(X)):
             risk_score = self._calculate_dynamic_risk_score(X.iloc[i])
-            # 风险分数 > 0.5 预测为阳性(1)，否则为阴性(0)
+            # 风险分数 > 0.5 预测为高风险(1)，否则为低风险(0)
             predictions.append(1 if risk_score > 0.5 else 0)
         return np.array(predictions)
     
@@ -99,23 +99,22 @@ class DynamicProbabilityModel:
             base_risk = self._calculate_dynamic_risk_score(patient)
 
             # 使用sigmoid函数转换为概率，确保合理范围
-            prob_positive = 1 / (1 + np.exp(-10 * (base_risk - 0.5)))
+            prob_high_risk = 1 / (1 + np.exp(-10 * (base_risk - 0.5)))
 
             # 确保概率在10%-90%之间
-            prob_positive = np.clip(prob_positive, 0.1, 0.9)
+            prob_high_risk = np.clip(prob_high_risk, 0.1, 0.9)
 
-            # 计算阴性概率
-            prob_negative = 1 - prob_positive
+            # 计算低风险概率
+            prob_low_risk = 1 - prob_high_risk
 
             # 轻微调整以确保总概率为1
-            total = prob_positive + prob_negative
+            total = prob_high_risk + prob_low_risk
             if total > 0:
-                prob_positive = prob_positive / total
-                prob_negative = prob_negative / total
+                prob_high_risk = prob_high_risk / total
+                prob_low_risk = prob_low_risk / total
 
-            # 返回 [阴性概率, 阳性概率] 或 [阳性概率, 阴性概率]? 
-            # 标准格式: [class_0_prob, class_1_prob] 其中 class_0=阴性, class_1=阳性
-            probabilities.append([prob_negative, prob_positive])
+            # 返回 [低风险概率, 高风险概率] 格式 (索引0=低风险, 索引1=高风险)
+            probabilities.append([prob_low_risk, prob_high_risk])
 
         return np.array(probabilities)
     
@@ -124,7 +123,7 @@ class DynamicProbabilityModel:
         score = 0.0
         
         # Age contribution (20-90岁，60岁以上风险显著增加)
-        age_norm = (patient['Age'] - 35) / 55  # 标准化到0-1
+        age_norm = max(0, (patient['Age'] - 60) / 30)  # 60岁以上开始增加
         score += age_norm * 0.30
         
         # Surgery time contribution (30-360分钟，超过120分钟风险增加)
@@ -154,7 +153,7 @@ class ShapCompatibleModel:
     def __init__(self):
         # 创建一个与临床规则一致的LightGBM模型
         self.lgb_model = self._create_trained_lightgbm()
-        self.classes_ = np.array([0, 1])  # 0: Negative, 1: Positive
+        self.classes_ = np.array([0, 1])  # 0: Negative/Low Risk, 1: Positive/High Risk
         self.feature_importances_ = self.lgb_model.feature_importances_
         
     def _create_trained_lightgbm(self):
@@ -171,26 +170,27 @@ class ShapCompatibleModel:
             'ESR': np.random.uniform(5, 80, n_samples)
         })
         
-        # 基于临床规则创建标签（与DynamicProbabilityModel保持一致）
-        # 1: Positive (高风险), 0: Negative (低风险)
+        # 基于临床规则创建标签
+        # 0: Low Risk, 1: High Risk
         y_train = []
         for i in range(n_samples):
             risk = 0
-            # Age contribution
-            risk += (X_train.iloc[i]['Age'] - 35) / 55 * 0.30
-            # Surgery time
+            # Age contribution (60岁以上)
+            risk += max(0, (X_train.iloc[i]['Age'] - 60) / 20) * 0.30
+            # Surgery time (超过120分钟)
             risk += max(0, (X_train.iloc[i]['Surgery.time'] - 120) / 240) * 0.25
             # Anesthesia
             risk += 0.15 if X_train.iloc[i]['Anesthesia'] == 1 else 0.05
-            # Calcium
+            # Calcium (低于2.1)
             risk += max(0, (2.1 - X_train.iloc[i]['Calcium']) / 0.6) * 0.20
-            # ESR
+            # ESR (超过30)
             risk += max(0, (X_train.iloc[i]['ESR'] - 30) / 70) * 0.10
             
             # 添加一些噪声
             risk += np.random.normal(0, 0.05)
             
-            y_train.append(1 if risk > 0.5 else 0)  # 1: Positive, 0: Negative
+            # 1: High Risk, 0: Low Risk
+            y_train.append(1 if risk > 0.5 else 0)
         
         # 训练LightGBM模型
         model = LGBMClassifier(
@@ -278,10 +278,10 @@ def load_models():
 prob_model, shap_model = load_models()
 
 # ==================== LABEL MAPPING ====================
-# 修正：0 = 阴性(低风险)，1 = 阳性(高风险)
+# 0 = 低风险(阴性)，1 = 高风险(阳性)
 label_map = {
-    1: "⚠️ Hypoproteinemia Positive (High Risk)",
-    0: "✅ Hypoproteinemia Negative (Low Risk)"
+    1: "⚠️ High Risk - Hypoproteinemia Positive",
+    0: "✅ Low Risk - Hypoproteinemia Negative"
 }
 
 # ==================== SIDEBAR ====================
@@ -297,11 +297,11 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 📋 Clinical Features")
 
 feature_descriptions = {
-    'Age': 'Patient age in years',
-    'Surgery.time': 'Duration of surgery in minutes',
-    'Anesthesia': 'Type of anesthesia (1: General anesthesia, 2: Non-general anesthesia)',
-    'Calcium': 'Serum calcium level (mmol/L)',
-    'ESR': 'Erythrocyte Sedimentation Rate (mm/h)'
+    'Age': 'Patient age in years (≥60 increases risk)',
+    'Surgery.time': 'Duration of surgery in minutes (>120 min increases risk)',
+    'Anesthesia': 'Type of anesthesia (1: General anesthesia - higher risk, 2: Non-general anesthesia)',
+    'Calcium': 'Serum calcium level (mmol/L) (<2.1 increases risk)',
+    'ESR': 'Erythrocyte Sedimentation Rate (mm/h) (>30 increases risk)'
 }
 
 for feature, desc in feature_descriptions.items():
@@ -330,7 +330,7 @@ if app_mode == "📊 Individual Patient Prediction":
             "**Age (years)**",
             min_value=20,
             max_value=90,
-            value=58,
+            value=65,
             help=feature_descriptions['Age']
         )
         
@@ -338,14 +338,14 @@ if app_mode == "📊 Individual Patient Prediction":
             "**Surgical Duration (minutes)**",
             min_value=30,
             max_value=360,
-            value=145,
+            value=150,
             step=5,
             help=feature_descriptions['Surgery.time']
         )
         
         Anesthesia = st.selectbox(
             "**Anesthesia Type**",
-            ["General anesthesia (1)", "Non-general anesthesia (2)"],
+            ["General anesthesia (Higher Risk)", "Non-general anesthesia (Lower Risk)"],
             index=0,
             help=feature_descriptions['Anesthesia']
         )
@@ -356,7 +356,7 @@ if app_mode == "📊 Individual Patient Prediction":
             "**Serum Calcium (mmol/L)**",
             min_value=1.5,
             max_value=2.8,
-            value=2.15,
+            value=2.0,
             step=0.01,
             help=feature_descriptions['Calcium']
         )
@@ -365,7 +365,7 @@ if app_mode == "📊 Individual Patient Prediction":
             "**ESR (mm/h)**",
             min_value=0,
             max_value=100,
-            value=28,
+            value=35,
             help=feature_descriptions['ESR']
         )
         
@@ -373,11 +373,11 @@ if app_mode == "📊 Individual Patient Prediction":
         st.markdown("#### 📊 Risk Indicators")
         
         risk_indicators = {
-            "Age > 60": Age > 60,
-            "Surgery > 2h": Surgery_time > 120,
+            "Age ≥ 60": Age >= 60,
+            "Surgery > 120 min": Surgery_time > 120,
             "General Anesthesia": Anesthesia_numeric == 1,
-            "Calcium < 2.1": Calcium < 2.1,
-            "ESR > 30": ESR > 30
+            "Calcium < 2.1 mmol/L": Calcium < 2.1,
+            "ESR > 30 mm/h": ESR > 30
         }
         
         risk_count = 0
@@ -385,9 +385,11 @@ if app_mode == "📊 Individual Patient Prediction":
             if is_risk:
                 st.markdown(f"<span style='color: #EF4444;'>⚠️ {indicator}</span>", unsafe_allow_html=True)
                 risk_count += 1
+            else:
+                st.markdown(f"<span style='color: #10B981;'>✓ {indicator}</span>", unsafe_allow_html=True)
         
         if risk_count == 0:
-            st.markdown("<span style='color: #10B981;'>✓ All parameters normal</span>", unsafe_allow_html=True)
+            st.markdown("<span style='color: #10B981;'>✓ No risk factors - Very Low Risk</span>", unsafe_allow_html=True)
         elif risk_count <= 2:
             st.markdown(f"<span style='color: #F59E0B;'>⚠️ Moderate risk ({risk_count} factors)</span>", unsafe_allow_html=True)
         else:
@@ -410,16 +412,15 @@ if app_mode == "📊 Individual Patient Prediction":
                 prediction = prob_model.predict(input_data)[0]
                 prediction_proba = prob_model.predict_proba(input_data)[0]
                 
-                # 获取概率
-                # prediction_proba 格式: [阴性概率, 阳性概率]
-                prob_negative = float(prediction_proba[0])
-                prob_positive = float(prediction_proba[1])
+                # 获取概率: [低风险概率, 高风险概率]
+                prob_low_risk = float(prediction_proba[0])
+                prob_high_risk = float(prediction_proba[1])
                 
                 # 归一化处理
-                total = prob_positive + prob_negative
+                total = prob_high_risk + prob_low_risk
                 if total > 0:
-                    prob_positive = prob_positive / total
-                    prob_negative = prob_negative / total
+                    prob_high_risk = prob_high_risk / total
+                    prob_low_risk = prob_low_risk / total
                 
                 # 显示结果
                 st.markdown("---")
@@ -441,7 +442,7 @@ if app_mode == "📊 Individual Patient Prediction":
                     """, unsafe_allow_html=True)
                 
                 with col2:
-                    confidence = prob_positive if prediction == 1 else prob_negative
+                    confidence = prob_high_risk if prediction == 1 else prob_low_risk
                     confidence_color = "#DC2626" if confidence > 0.8 else ("#F59E0B" if confidence > 0.6 else "#10B981")
                     st.markdown(f"""
                     <div class="metric-card">
@@ -458,8 +459,9 @@ if app_mode == "📊 Individual Patient Prediction":
                         <div class="metric-card">
                             <p class="stat-label">CLINICAL ACTION</p>
                             <p style="color: #DC2626; font-weight: bold;">
-                            Intensive Monitoring Required
+                            🚨 Intensive Monitoring Required
                             </p>
+                            <p style="font-size: 0.8rem;">• Daily protein monitoring<br>• Nutritional support<br>• Consider ICU consult</p>
                         </div>
                         """, unsafe_allow_html=True)
                     else:
@@ -467,8 +469,9 @@ if app_mode == "📊 Individual Patient Prediction":
                         <div class="metric-card">
                             <p class="stat-label">CLINICAL ACTION</p>
                             <p style="color: #059669; font-weight: bold;">
-                            Standard Care Protocol
+                            ✅ Standard Care Protocol
                             </p>
+                            <p style="font-size: 0.8rem;">• Routine monitoring<br>• Standard nutrition<br>• Regular discharge planning</p>
                         </div>
                         """, unsafe_allow_html=True)
                 
@@ -478,8 +481,8 @@ if app_mode == "📊 Individual Patient Prediction":
                 fig_prob = go.Figure()
                 fig_prob.add_trace(go.Bar(
                     x=['High Risk (Positive)', 'Low Risk (Negative)'],
-                    y=[prob_positive, prob_negative],
-                    text=[f'{prob_positive*100:.1f}%', f'{prob_negative*100:.1f}%'],
+                    y=[prob_high_risk, prob_low_risk],
+                    text=[f'{prob_high_risk*100:.1f}%', f'{prob_low_risk*100:.1f}%'],
                     textposition='auto',
                     marker_color=['#EF4444', '#10B981'],
                     width=0.5
@@ -496,6 +499,33 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 st.plotly_chart(fig_prob, use_container_width=True)
                 
+                # 风险评分详细信息
+                st.markdown('<h3 class="sub-header">Risk Score Breakdown</h3>', unsafe_allow_html=True)
+                
+                # 计算各因素贡献
+                risk_score = prob_high_risk
+                
+                # 显示风险因素贡献
+                contributions = []
+                if Age >= 60:
+                    age_contrib = min(0.30, (Age - 60) / 30 * 0.30)
+                    contributions.append({"Factor": "Age ≥ 60", "Contribution": f"{age_contrib*100:.1f}%", "Status": "⚠️"})
+                if Surgery_time > 120:
+                    surgery_contrib = min(0.25, (Surgery_time - 120) / 240 * 0.25)
+                    contributions.append({"Factor": "Surgery > 120 min", "Contribution": f"{surgery_contrib*100:.1f}%", "Status": "⚠️"})
+                if Anesthesia_numeric == 1:
+                    contributions.append({"Factor": "General Anesthesia", "Contribution": "15.0%", "Status": "⚠️"})
+                if Calcium < 2.1:
+                    calcium_contrib = min(0.20, (2.1 - Calcium) / 0.6 * 0.20)
+                    contributions.append({"Factor": "Calcium < 2.1", "Contribution": f"{calcium_contrib*100:.1f}%", "Status": "⚠️"})
+                if ESR > 30:
+                    esr_contrib = min(0.10, (ESR - 30) / 70 * 0.10)
+                    contributions.append({"Factor": "ESR > 30", "Contribution": f"{esr_contrib*100:.1f}%", "Status": "⚠️"})
+                
+                if contributions:
+                    contrib_df = pd.DataFrame(contributions)
+                    st.dataframe(contrib_df, use_container_width=True, hide_index=True)
+                
                 # SHAP瀑布图
                 st.markdown('<h3 class="sub-header">SHAP Waterfall Plot - Feature Contributions</h3>', unsafe_allow_html=True)
                 
@@ -503,7 +533,6 @@ if app_mode == "📊 Individual Patient Prediction":
                 shap_fig = create_shap_waterfall_plot(input_data, shap_model)
                 
                 if shap_fig is not None:
-                    # 显示SHAP瀑布图
                     st.pyplot(shap_fig)
                     plt.close(shap_fig)
                     
@@ -513,37 +542,15 @@ if app_mode == "📊 Individual Patient Prediction":
                     ### 📊 **SHAP Waterfall Plot Interpretation**
                     
                     **How to read this plot:**
-                    - **Red bars**: Features that increase the probability of hypoproteinemia
-                    - **Blue bars**: Features that decrease the probability
+                    - **Red bars**: Features that increase the probability of hypoproteinemia (higher risk)
+                    - **Blue bars**: Features that decrease the probability (lower risk)
                     - **Bar length**: Magnitude of the feature's contribution
                     - **E[f(X)]**: Expected/base value (average prediction)
                     - **f(x)**: Final prediction for this specific patient
-                    
-                    **Note**: This SHAP analysis is based on a LightGBM model trained with similar clinical logic.
                     """)
                     st.markdown('</div>', unsafe_allow_html=True)
                 else:
-                    st.warning("⚠️ SHAP visualization not available. Showing feature importance instead.")
-                    
-                    # 显示特征重要性
-                    features = ['Age', 'Surgery Time', 'Anesthesia', 'Calcium', 'ESR']
-                    importance = prob_model.feature_importances_
-                    
-                    fig_imp = go.Figure()
-                    fig_imp.add_trace(go.Bar(
-                        x=features,
-                        y=importance,
-                        marker_color='#3B82F6'
-                    ))
-                    
-                    fig_imp.update_layout(
-                        title='Feature Importance',
-                        xaxis_title='Clinical Feature',
-                        yaxis_title='Importance',
-                        height=400
-                    )
-                    
-                    st.plotly_chart(fig_imp, use_container_width=True)
+                    st.warning("⚠️ SHAP visualization not available.")
                 
                 # 特征值表格
                 st.markdown('<h3 class="sub-header">Input Feature Values</h3>', unsafe_allow_html=True)
@@ -553,16 +560,16 @@ if app_mode == "📊 Individual Patient Prediction":
                     'Value': [
                         f"{Age} years",
                         f"{Surgery_time} minutes",
-                        "General" if Anesthesia_numeric == 1 else "Non-general",
+                        "General (Higher Risk)" if Anesthesia_numeric == 1 else "Non-general (Lower Risk)",
                         f"{Calcium:.2f} mmol/L",
                         f"{ESR} mm/h"
                     ],
-                    'Clinical Interpretation': [
-                        "High risk" if Age > 60 else "Normal",
-                        "High risk" if Surgery_time > 120 else "Normal",
-                        "Higher risk" if Anesthesia_numeric == 1 else "Lower risk",
-                        "High risk" if Calcium < 2.1 else "Normal",
-                        "High risk" if ESR > 30 else "Normal"
+                    'Risk Status': [
+                        "⚠️ High Risk" if Age >= 60 else "✅ Normal",
+                        "⚠️ High Risk" if Surgery_time > 120 else "✅ Normal",
+                        "⚠️ Higher Risk" if Anesthesia_numeric == 1 else "✅ Lower Risk",
+                        "⚠️ High Risk" if Calcium < 2.1 else "✅ Normal",
+                        "⚠️ High Risk" if ESR > 30 else "✅ Normal"
                     ]
                 })
                 
@@ -574,7 +581,7 @@ if app_mode == "📊 Individual Patient Prediction":
                 
                 if prediction == 1:
                     st.markdown("""
-                    **Based on high risk prediction (Probability > 50%):**
+                    **Based on HIGH RISK prediction:**
                     
                     1. **Enhanced Monitoring**
                        - Daily serum protein levels for 3-5 days
@@ -596,7 +603,7 @@ if app_mode == "📊 Individual Patient Prediction":
                     """)
                 else:
                     st.markdown("""
-                    **Based on low risk prediction (Probability ≤ 50%):**
+                    **Based on LOW RISK prediction:**
                     
                     1. **Standard Monitoring**
                        - Serum protein check on postoperative day 1 and 3
@@ -618,7 +625,7 @@ if app_mode == "📊 Individual Patient Prediction":
                 st.markdown('<div class="info-box">', unsafe_allow_html=True)
                 st.markdown('### 🎯 **Risk Stratification**')
                 
-                risk_score = prob_positive
+                risk_score = prob_high_risk
                 if risk_score > 0.7:
                     st.markdown(f"**Very High Risk** ({risk_score*100:.1f}%) - Consider ICU monitoring")
                 elif risk_score > 0.5:
@@ -810,7 +817,7 @@ else:
     
     | Feature | Clinical Significance | High Risk Threshold |
     |---------|----------------------|---------------------|
-    | Age | Older patients have reduced physiological reserve | > 60 years |
+    | Age | Older patients have reduced physiological reserve | ≥ 60 years |
     | Surgery Time | Longer surgeries increase inflammatory response | > 120 minutes |
     | Anesthesia | General anesthesia causes greater metabolic stress | General anesthesia (1) |
     | Calcium | Low calcium indicates metabolic disturbances | < 2.1 mmol/L |
